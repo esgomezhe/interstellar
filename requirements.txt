@@ -1,0 +1,9 @@
+numpy>=1.26
+scipy>=1.12
+matplotlib>=3.8
+numba>=0.59
+pillow>=10
+imageio>=2.34
+imageio-ffmpeg>=0.4
+pyyaml>=6.0
+tqdm>=4.66

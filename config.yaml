@@ -1,0 +1,28 @@
+# Black Hole Simulation Configuration
+# Units: G = c = M = 1, rs = 2
+
+physics:
+  rs: 2.0                # Schwarzschild radius (2M in geometrized units)
+  r_isco: 6.0            # Innermost stable circular orbit (3 rs)
+  r_disk_outer: 20.0     # Outer edge of accretion disk (10 rs)
+  r_camera: 30.0         # Camera distance from center
+
+render:
+  width: 400
+  height: 225
+  fov_deg: 16.0          # Field of view in degrees
+  max_phi: 40.0          # Max azimuthal angle for integration (radians)
+  n_steps: 2000          # Max integration steps per ray
+
+solver:
+  method: RK45
+  rtol: 1.0e-6
+  atol: 1.0e-8
+
+animation:
+  n_frames: 60
+  fps: 24
+
+output:
+  frames_dir: outputs/frames
+  geodesic_plots_dir: outputs/geodesic_plots
