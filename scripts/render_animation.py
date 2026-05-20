@@ -1,14 +1,15 @@
 """
-Renderiza una animacion del agujero negro variando el angulo polar.
+Animacion cinematografica de 10 segundos del agujero negro de Schwarzschild.
 
-La camara desciende desde una vista casi cenital (theta=30 grados, mirando
-casi directo al polo del disco) hasta una vista casi ecuatorial (theta=85
-grados, vista rasante tipo "Gargantua"), y luego regresa. Este movimiento
-muestra la progresion dramatica de los efectos de lente gravitacional:
+Trayectoria con keyframes suavizados (CubicSpline periodica):
+  - Descenso desde vista cenital (theta=15) hasta ecuatorial (theta=87)
+  - Pausa prolongada cerca del plano ecuatorial para detallar el lensing
+  - Retorno suave al punto de partida (loop continuo)
 
-  - Cenital: disco casi circular, asimetria Doppler sutil
-  - Intermedio: el clasico look de Interstellar con disco doblado
-  - Ecuatorial: lensing extremo con multiples imagenes del disco
+La animacion muestra la progresion dramatica del lensing gravitacional:
+  - Cenital: disco casi circular, sombra redonda, Doppler sutil
+  - Intermedio (~75): el clasico look de Interstellar con disco doblado
+  - Ecuatorial (~87): lensing extremo, multiples imagenes, anillo de fotones
 
 Salida: PNGs individuales + GIF animado + MP4.
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import imageio.v3 as iio
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -69,35 +71,57 @@ def precompute_rays(camera):
     return b_arr, e1_arr, e2_arr
 
 
+def build_trajectory(n_frames):
+    """
+    Construye la trayectoria de theta con keyframes suavizados.
+
+    Keyframes (tiempo normalizado -> theta en grados):
+      0.00 -> 15   (cenital, inicio)
+      0.20 -> 55   (descenso intermedio)
+      0.35 -> 80   (acercamiento al ecuador)
+      0.50 -> 87   (vista ecuatorial, lensing maximo)
+      0.65 -> 80   (salida del ecuador)
+      0.80 -> 55   (ascenso intermedio)
+      1.00 -> 15   (regreso a cenital, cierra loop)
+
+    Usa CubicSpline periodica para transiciones suaves y loop continuo.
+    """
+    kf_t = np.array([0.0, 0.20, 0.35, 0.50, 0.65, 0.80, 1.0])
+    kf_theta = np.array([15.0, 55.0, 80.0, 87.0, 80.0, 55.0, 15.0])
+
+    cs = CubicSpline(kf_t, kf_theta, bc_type="periodic")
+    t_eval = np.linspace(0.0, 1.0, n_frames, endpoint=False)
+    theta_deg = cs(t_eval)
+
+    # Clamp por seguridad (la spline puede oscilar ligeramente fuera de rango)
+    theta_deg = np.clip(theta_deg, 10.0, 89.0)
+
+    return np.radians(theta_deg), theta_deg
+
+
 def main() -> None:
-    n_frames = 60
-    width = 480
-    height = 272  # divisible entre 16 para compatibilidad con codecs de video
+    n_frames = 240
+    width = 640
+    height = 368  # divisible entre 16 para codecs de video
     fps = 24
     fov = 30.0
     n_steps = 3000
     phi_max = 50.0
     gamma_correction = 0.45
 
-    # Trayectoria de theta: descenso de cenital a ecuatorial y regreso
-    # theta=30 grados (60 grados arriba del ecuador) a theta=85 grados (5 grados)
-    theta_min = np.radians(30.0)   # vista casi cenital
-    theta_max = np.radians(85.0)   # vista casi ecuatorial
-    # Oscilacion sinusoidal: ida y vuelta suave
-    t = np.linspace(0.0, 2.0 * np.pi, n_frames, endpoint=False)
-    theta_values = 0.5 * (theta_min + theta_max) + 0.5 * (theta_min - theta_max) * np.cos(t)
+    theta_values, theta_deg_values = build_trajectory(n_frames)
 
     frames_dir = Path("outputs/frames/animation")
     frames_dir.mkdir(parents=True, exist_ok=True)
 
-    print("=" * 60)
-    print("  Ray Tracer — Animacion: Descenso Polar")
-    print("=" * 60)
+    print("=" * 65)
+    print("  Ray Tracer — Animacion Cinematografica (10s)")
+    print("=" * 65)
     print(f"Resolucion: {width}x{height} ({width * height:,} px/frame)")
     print(f"Frames: {n_frames} | FPS: {fps} | Duracion: {n_frames / fps:.1f}s")
-    print(f"Camara: r={R_CAMERA:.0f}M")
-    print(f"Theta: {np.degrees(theta_min):.0f} grados (cenital) "
-          f"<-> {np.degrees(theta_max):.0f} grados (ecuatorial)")
+    print(f"Camara: r={R_CAMERA:.0f}M, FOV={fov} grados")
+    print(f"Trayectoria: theta 15 -> 87 -> 15 grados (keyframes suavizados)")
+    print(f"Disco: r_inner={R_ISCO:.0f}M, r_outer={R_DISK_OUTER:.0f}M")
 
     # Warmup JIT
     print("\nCalentando JIT...")
@@ -140,16 +164,18 @@ def main() -> None:
         iio.imwrite(png_path, frame_uint8)
 
         dt = time.perf_counter() - t_frame
-        deg = np.degrees(theta_cam)
+        deg = theta_deg_values[frame_idx]
         elev = 90.0 - deg
-        print(f"  Frame {frame_idx + 1:3d}/{n_frames} | "
+        # Barra de progreso compacta
+        pct = 100 * (frame_idx + 1) / n_frames
+        print(f"  [{pct:5.1f}%] Frame {frame_idx + 1:3d}/{n_frames} | "
               f"theta={deg:5.1f} ({elev:+5.1f} sobre ecuador) | {dt:.2f}s")
 
     t_render_total = time.perf_counter() - t_total_start
-    print(f"\nTodos los frames renderizados en {t_render_total:.1f}s "
-          f"({t_render_total / n_frames:.2f}s/frame)")
+    avg_frame = t_render_total / n_frames
+    print(f"\nRender completado: {t_render_total:.1f}s total ({avg_frame:.2f}s/frame)")
 
-    # Ensamblar GIF
+    # Ensamblar GIF (calidad reducida para tamanio razonable)
     print("\nEnsamblando GIF...")
     gif_path = Path("outputs/animation.gif")
     gif_path.parent.mkdir(parents=True, exist_ok=True)
@@ -176,13 +202,13 @@ def main() -> None:
     print(f"MP4 guardado: {mp4_path} ({mp4_size_mb:.1f} MB)")
 
     # Resumen
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 65}")
     print(f"  Frames:     {n_frames} x {width}x{height}")
-    print(f"  Render:     {t_render_total:.1f}s total ({t_render_total / n_frames:.2f}s/frame)")
+    print(f"  Render:     {t_render_total:.1f}s ({avg_frame:.2f}s/frame)")
     print(f"  GIF:        {gif_path} ({gif_size_mb:.1f} MB)")
     print(f"  MP4:        {mp4_path} ({mp4_size_mb:.1f} MB)")
     print(f"  Duracion:   {n_frames / fps:.1f}s a {fps} fps")
-    print(f"{'=' * 60}")
+    print(f"{'=' * 65}")
 
 
 if __name__ == "__main__":
