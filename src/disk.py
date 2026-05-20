@@ -47,8 +47,8 @@ class AccretionDisk:
         r: NDArray[np.float64],
         e1: NDArray[np.float64],
         e2: NDArray[np.float64],
-    ) -> list[float]:
-        """Encuentra los radios donde una geodesica cruza el plano ecuatorial.
+    ) -> list[tuple[float, float]]:
+        """Encuentra donde una geodesica cruza el plano ecuatorial.
 
         La coordenada z en 3D a lo largo de la geodesica es:
             z(psi) = r(psi) * [cos(psi)*e1_z + sin(psi)*e2_z]
@@ -57,16 +57,16 @@ class AccretionDisk:
             cos(psi)*e1_z + sin(psi)*e2_z = 0
 
         Detectamos cambios de signo en z a lo largo de la trayectoria
-        e interpolamos para encontrar el radio de cruce.
+        e interpolamos para encontrar el radio y angulo de cruce.
 
         Args:
-            psi: Arreglo de angulos a lo largo de la geodesica (lo que llamamos phi en la Fase 1).
+            psi: Arreglo de angulos a lo largo de la geodesica.
             r: Arreglo de radios (1/u).
             e1: Vector base del plano orbital (radial).
             e2: Vector base del plano orbital (perpendicular).
 
         Returns:
-            Lista de radios en los cruces ecuatoriales que caen dentro del disco.
+            Lista de tuplas (r_cruce, psi_cruce) para cruces dentro del disco.
         """
         z = r * (np.cos(psi) * e1[2] + np.sin(psi) * e2[2])
 
@@ -76,6 +76,7 @@ class AccretionDisk:
                 # Interpolacion lineal para encontrar el punto de cruce
                 frac = abs(z[k]) / (abs(z[k]) + abs(z[k + 1]))
                 r_cross = r[k] + frac * (r[k + 1] - r[k])
+                psi_cross = psi[k] + frac * (psi[k + 1] - psi[k])
                 if self.contains(r_cross):
-                    crossings.append(r_cross)
+                    crossings.append((r_cross, psi_cross))
         return crossings
