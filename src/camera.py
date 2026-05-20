@@ -41,15 +41,14 @@ class Camera:
     width: int
     height: int
     fov: float = 16.0
+    phi: float = 0.0
 
     @property
     def position(self) -> NDArray[np.float64]:
         """Posicion de la camara en coordenadas cartesianas."""
-        return self.r * np.array([
-            np.sin(self.theta),
-            0.0,
-            np.cos(self.theta),
-        ])
+        st, ct = np.sin(self.theta), np.cos(self.theta)
+        sp, cp = np.sin(self.phi), np.cos(self.phi)
+        return self.r * np.array([st * cp, st * sp, ct])
 
     @property
     def _basis(self) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
@@ -58,9 +57,10 @@ class Camera:
         Retorna (e_r, e_theta, e_phi) en coordenadas cartesianas.
         """
         st, ct = np.sin(self.theta), np.cos(self.theta)
-        e_r = np.array([st, 0.0, ct])
-        e_theta = np.array([ct, 0.0, -st])
-        e_phi = np.array([0.0, 1.0, 0.0])
+        sp, cp = np.sin(self.phi), np.cos(self.phi)
+        e_r = np.array([st * cp, st * sp, ct])
+        e_theta = np.array([ct * cp, ct * sp, -st])
+        e_phi = np.array([-sp, cp, 0.0])
         return e_r, e_theta, e_phi
 
     def pixel_to_ray(self, i: int, j: int) -> RayInfo:
