@@ -199,9 +199,13 @@ def print_validation_report(r_cam: float = R_CAMERA) -> None:
     print("\n" + "=" * 60)
 
 
-if __name__ == "__main__":
+def main() -> None:
     import matplotlib
     matplotlib.use("Agg")
 
     print_validation_report()
     plot_geodesics(save_path="outputs/geodesic_plots/phase1_geodesics.png")
+
+
+if __name__ == "__main__":
+    main()
