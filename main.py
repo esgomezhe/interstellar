@@ -26,6 +26,12 @@ SCRIPT_MAP = {
     "interactive": "interactive",
 }
 
+OUTPUT_FILES = {
+    "geodesics": "outputs/geodesic_plots/phase1_geodesics.png",
+    "frame":     "outputs/frames/frame_numba.png",
+    "animation": "outputs/animation.gif",
+}
+
 
 def run_mode(mode: str) -> None:
     script_name = SCRIPT_MAP.get(mode)
@@ -46,7 +52,7 @@ def run_mode(mode: str) -> None:
 
 def launch_gui() -> None:
     import tkinter as tk
-    from tkinter import ttk
+    from PIL import Image, ImageTk
 
     # --- Colores ---
     BG = "#0d0d0d"
@@ -55,7 +61,6 @@ def launch_gui() -> None:
     FG = "#e0e0e0"
     FG_DIM = "#808080"
     ACCENT = "#d4a017"
-    ACCENT_HOVER = "#e8b830"
     RUNNING_COLOR = "#3a7d3a"
 
     # --- Ventana principal ---
@@ -71,7 +76,117 @@ def launch_gui() -> None:
     y = (screen_h - win_h) // 2
     root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
-    # --- Header ---
+    # ------------------------------------------------------------------
+    # Viewer: ventana para mostrar imagenes y animaciones
+    # ------------------------------------------------------------------
+    def open_viewer(file_path: str, title: str) -> None:
+        path = ROOT / file_path
+        if not path.exists():
+            return
+
+        img = Image.open(path)
+        is_gif = hasattr(img, "n_frames") and img.n_frames > 1
+
+        viewer = tk.Toplevel(root)
+        viewer.title(title)
+        viewer.configure(bg="#000000")
+
+        # Escalar para que quepa en pantalla con margen
+        max_w = int(screen_w * 0.85)
+        max_h = int(screen_h * 0.85)
+
+        if is_gif:
+            # Extraer frames y duracion
+            frames_pil = []
+            try:
+                while True:
+                    frame = img.copy().convert("RGBA")
+                    frames_pil.append(frame)
+                    img.seek(img.tell() + 1)
+            except EOFError:
+                pass
+
+            duration = img.info.get("duration", 42)  # ms por frame
+
+            # Escalar todos los frames
+            orig_w, orig_h = frames_pil[0].size
+            scale = min(max_w / orig_w, max_h / orig_h, 1.0)
+            disp_w = int(orig_w * scale)
+            disp_h = int(orig_h * scale)
+
+            frames_tk = []
+            for f in frames_pil:
+                if scale < 1.0:
+                    f = f.resize((disp_w, disp_h), Image.LANCZOS)
+                frames_tk.append(ImageTk.PhotoImage(f))
+
+            viewer.geometry(f"{disp_w}x{disp_h + 36}")
+            viewer.resizable(False, False)
+
+            canvas = tk.Label(viewer, bg="#000000")
+            canvas.pack(expand=True)
+
+            # Barra de control
+            ctrl = tk.Frame(viewer, bg="#111111", height=36)
+            ctrl.pack(fill="x", side="bottom")
+            ctrl.pack_propagate(False)
+
+            playing = {"on": True}
+            frame_idx = {"i": 0}
+
+            info_label = tk.Label(
+                ctrl,
+                text=f"Frame 1/{len(frames_tk)}",
+                font=("Consolas", 9), fg=FG_DIM, bg="#111111",
+            )
+            info_label.pack(side="left", padx=10)
+
+            def toggle_play():
+                playing["on"] = not playing["on"]
+                play_btn.configure(text="||" if playing["on"] else ">>")
+
+            play_btn = tk.Label(
+                ctrl, text="||",
+                font=("Consolas", 10, "bold"), fg=FG, bg=ACCENT,
+                padx=10, pady=2, cursor="hand2",
+            )
+            play_btn.pack(side="right", padx=10, pady=4)
+            play_btn.bind("<Button-1>", lambda e: toggle_play())
+
+            def animate():
+                if not viewer.winfo_exists():
+                    return
+                idx = frame_idx["i"]
+                canvas.configure(image=frames_tk[idx])
+                info_label.configure(text=f"Frame {idx + 1}/{len(frames_tk)}")
+                if playing["on"]:
+                    frame_idx["i"] = (idx + 1) % len(frames_tk)
+                viewer.after(duration, animate)
+
+            animate()
+
+        else:
+            # Imagen estatica
+            img = img.convert("RGBA")
+            orig_w, orig_h = img.size
+            scale = min(max_w / orig_w, max_h / orig_h, 1.0)
+            disp_w = int(orig_w * scale)
+            disp_h = int(orig_h * scale)
+
+            if scale < 1.0:
+                img = img.resize((disp_w, disp_h), Image.LANCZOS)
+
+            viewer.geometry(f"{disp_w}x{disp_h}")
+            viewer.resizable(False, False)
+
+            photo = ImageTk.PhotoImage(img)
+            label = tk.Label(viewer, image=photo, bg="#000000")
+            label.image = photo  # keep reference
+            label.pack(expand=True)
+
+    # ------------------------------------------------------------------
+    # Header
+    # ------------------------------------------------------------------
     header = tk.Frame(root, bg=BG)
     header.pack(fill="x", padx=30, pady=(28, 0))
 
@@ -140,6 +255,21 @@ def launch_gui() -> None:
 
     cards = []
 
+    def set_card_bg(card: tk.Frame, color: str) -> None:
+        card.configure(bg=color)
+        for child in card.winfo_children():
+            if isinstance(child, tk.Label) and child.cget("bg") not in (ACCENT, RUNNING_COLOR):
+                child.configure(bg=color)
+            if isinstance(child, tk.Frame):
+                child.configure(bg=color)
+                for sub in child.winfo_children():
+                    if isinstance(sub, (tk.Label, tk.Frame)):
+                        if sub.cget("bg") not in (ACCENT, RUNNING_COLOR):
+                            sub.configure(bg=color)
+                            for s2 in sub.winfo_children():
+                                if isinstance(s2, tk.Label) and s2.cget("bg") not in (ACCENT, RUNNING_COLOR):
+                                    s2.configure(bg=color)
+
     def run_task(mode_key: str, card_frame: tk.Frame, btn: tk.Label) -> None:
         if running_task["active"]:
             return
@@ -148,7 +278,6 @@ def launch_gui() -> None:
         btn.configure(text="RUNNING...", bg=RUNNING_COLOR)
         status_var.set(f"Running: {mode_key}...")
 
-        # Disable all buttons visually
         for _, _, b in cards:
             b.configure(fg="#555555")
 
@@ -161,8 +290,13 @@ def launch_gui() -> None:
                 )
                 if proc.returncode == 0:
                     root.after(0, lambda: status_var.set(f"Completed: {mode_key}"))
+                    output = OUTPUT_FILES.get(mode_key)
+                    if output:
+                        root.after(100, lambda: open_viewer(output, mode_key.title()))
                 else:
-                    root.after(0, lambda: status_var.set(f"Error running {mode_key} (code {proc.returncode})"))
+                    root.after(0, lambda: status_var.set(
+                        f"Error running {mode_key} (code {proc.returncode})"
+                    ))
             except Exception as e:
                 root.after(0, lambda: status_var.set(f"Error: {e}"))
             finally:
@@ -178,7 +312,6 @@ def launch_gui() -> None:
         card.pack_propagate(False)
         card.configure(height=90)
 
-        # Left: icon
         icon_label = tk.Label(
             card, text=mode["icon"],
             font=("Consolas", 20, "bold"), fg=ACCENT, bg=BG_CARD,
@@ -186,7 +319,6 @@ def launch_gui() -> None:
         )
         icon_label.pack(side="left", padx=(12, 4))
 
-        # Right: run button
         btn = tk.Label(
             card, text="RUN",
             font=("Segoe UI", 9, "bold"), fg=FG, bg=ACCENT,
@@ -194,7 +326,6 @@ def launch_gui() -> None:
         )
         btn.pack(side="right", padx=14)
 
-        # Center: text
         text_frame = tk.Frame(card, bg=BG_CARD)
         text_frame.pack(side="left", fill="both", expand=True, pady=10)
 
@@ -219,41 +350,9 @@ def launch_gui() -> None:
             anchor="w", justify="left",
         ).pack(fill="x", anchor="w")
 
-        # Hover effects
-        def on_enter(e, c=card):
-            c.configure(bg=BG_HOVER)
-            for child in c.winfo_children():
-                if isinstance(child, tk.Label) and child.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                    child.configure(bg=BG_HOVER)
-                if isinstance(child, tk.Frame):
-                    child.configure(bg=BG_HOVER)
-                    for sub in child.winfo_children():
-                        if isinstance(sub, (tk.Label, tk.Frame)):
-                            if sub.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                                sub.configure(bg=BG_HOVER)
-                                for s2 in sub.winfo_children():
-                                    if isinstance(s2, tk.Label) and s2.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                                        s2.configure(bg=BG_HOVER)
+        card.bind("<Enter>", lambda e, c=card: set_card_bg(c, BG_HOVER))
+        card.bind("<Leave>", lambda e, c=card: set_card_bg(c, BG_CARD))
 
-        def on_leave(e, c=card):
-            c.configure(bg=BG_CARD)
-            for child in c.winfo_children():
-                if isinstance(child, tk.Label) and child.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                    child.configure(bg=BG_CARD)
-                if isinstance(child, tk.Frame):
-                    child.configure(bg=BG_CARD)
-                    for sub in child.winfo_children():
-                        if isinstance(sub, (tk.Label, tk.Frame)):
-                            if sub.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                                sub.configure(bg=BG_CARD)
-                                for s2 in sub.winfo_children():
-                                    if isinstance(s2, tk.Label) and s2.cget("bg") not in (ACCENT, RUNNING_COLOR):
-                                        s2.configure(bg=BG_CARD)
-
-        card.bind("<Enter>", on_enter)
-        card.bind("<Leave>", on_leave)
-
-        # Click handlers
         key = mode["key"]
         btn.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
         card.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
