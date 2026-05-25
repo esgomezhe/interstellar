@@ -144,6 +144,7 @@ def find_crossings(phi, r, n_pts, e1_z, e2_z, r_inner, r_outer):
     """
     r_cross = np.empty(_MAX_CROSSINGS)
     psi_cross = np.empty(_MAX_CROSSINGS)
+    cross_idx = np.empty(_MAX_CROSSINGS, dtype=np.int64)
     count = 0
 
     for k in range(n_pts - 1):
@@ -160,11 +161,12 @@ def find_crossings(phi, r, n_pts, e1_z, e2_z, r_inner, r_outer):
             if r_inner <= rc <= r_outer:
                 r_cross[count] = rc
                 psi_cross[count] = pc
+                cross_idx[count] = k
                 count += 1
                 if count >= _MAX_CROSSINGS:
                     break
 
-    return r_cross, psi_cross, count
+    return r_cross, psi_cross, cross_idx, count
 
 
 # ---------------------------------------------------------------------------
@@ -279,40 +281,237 @@ def blackbody_rgb(temperature):
 # ---------------------------------------------------------------------------
 
 @njit(cache=True)
+def limb_darkening(cos_theta_e, mu=0.5):
+    """Limb darkening por scattering de electrones en la atmosfera del disco.
+
+    I_obs = I_0 * (1 + mu * cos_theta_e) / (1 + mu)
+
+    cos_theta_e: coseno del angulo entre la normal al disco (eje z) y la
+                 direccion del foton en el punto de cruce.
+    mu: coeficiente de limb darkening (~0.5 para scattering por electrones).
+    """
+    if cos_theta_e < 0.0:
+        cos_theta_e = -cos_theta_e
+    return (1.0 + mu * cos_theta_e) / (1.0 + mu)
+
+
+@njit(cache=True)
+def _compute_limb_factor(psi_hit, e1, e2, phi_arr, r_arr, cross_idx, n_valid):
+    """Calcula el factor de limb darkening para un cruce ecuatorial.
+
+    Estima la direccion del rayo en el punto de cruce a partir de la
+    tangente a la trayectoria, y computa cos(theta_e) con la normal del disco.
+    """
+    # Direccion del rayo: tangente a r(psi)*[cos(psi)*e1 + sin(psi)*e2]
+    # Aproximacion: usar la diferencia finita entre puntos adyacentes
+    k = cross_idx
+    if k <= 0 or k >= n_valid - 1:
+        return 1.0
+
+    # Posicion en puntos k y k+1
+    cp0, sp0 = np.cos(phi_arr[k]), np.sin(phi_arr[k])
+    cp1, sp1 = np.cos(phi_arr[k + 1]), np.sin(phi_arr[k + 1])
+    r0, r1 = r_arr[k], r_arr[k + 1]
+
+    dx = r1 * (cp1 * e1[0] + sp1 * e2[0]) - r0 * (cp0 * e1[0] + sp0 * e2[0])
+    dy = r1 * (cp1 * e1[1] + sp1 * e2[1]) - r0 * (cp0 * e1[1] + sp0 * e2[1])
+    dz = r1 * (cp1 * e1[2] + sp1 * e2[2]) - r0 * (cp0 * e1[2] + sp0 * e2[2])
+
+    d_len = np.sqrt(dx * dx + dy * dy + dz * dz)
+    if d_len < 1e-12:
+        return 1.0
+
+    # cos(theta_e) = |dz / d_len| (normal del disco es eje z)
+    cos_theta_e = abs(dz / d_len)
+    return limb_darkening(cos_theta_e)
+
+
+@njit(cache=True)
+def _hash21(px, py):
+    """Hash 2D -> 1D para ruido procedural."""
+    px = (px * 123.34) % 1.0
+    py = (py * 456.21) % 1.0
+    dot = px * (px + 45.32) + py * (py + 45.32)
+    return (px * py + dot) % 1.0
+
+
+@njit(cache=True)
+def _noise2d(px, py):
+    """Ruido 2D basado en hash con interpolacion suave."""
+    ix = int(np.floor(px))
+    iy = int(np.floor(py))
+    fx = px - ix
+    fy = py - iy
+    # smoothstep
+    fx = fx * fx * (3.0 - 2.0 * fx)
+    fy = fy * fy * (3.0 - 2.0 * fy)
+
+    a = _hash21(ix % 1000 * 0.001, iy % 1000 * 0.001)
+    b = _hash21((ix + 1) % 1000 * 0.001, iy % 1000 * 0.001)
+    c = _hash21(ix % 1000 * 0.001, (iy + 1) % 1000 * 0.001)
+    d = _hash21((ix + 1) % 1000 * 0.001, (iy + 1) % 1000 * 0.001)
+
+    ab = a + fx * (b - a)
+    cd = c + fx * (d - c)
+    return ab + fy * (cd - ab)
+
+
+@njit(cache=True)
+def _fbm(px, py):
+    """Fractional Brownian Motion con 4 octavas."""
+    val = 0.0
+    amp = 0.5
+    for _ in range(4):
+        val += amp * _noise2d(px, py)
+        px *= 2.0
+        py *= 2.0
+        amp *= 0.5
+    return val
+
+
+@njit(cache=True)
+def disk_turbulence(r, psi, e1, e2, m, t):
+    """Textura de turbulencia del disco con rotacion diferencial.
+
+    Modula la emision con ruido procedural que rota a velocidad kepleriana.
+    """
+    _TURB_AMPLITUDE = 0.2
+
+    # Posicion 3D del punto para calcular angulo azimutal
+    cos_psi = np.cos(psi)
+    sin_psi = np.sin(psi)
+    hit_x = r * (cos_psi * e1[0] + sin_psi * e2[0])
+    hit_y = r * (cos_psi * e1[1] + sin_psi * e2[1])
+    azimuth = np.arctan2(hit_y, hit_x)
+
+    # Rotacion diferencial kepleriana
+    omega = np.sqrt(m / (r * r * r))
+    phi_rot = azimuth - omega * t
+
+    # Coordenadas de ruido
+    noise_x = np.log(r) * 4.0
+    noise_y = phi_rot * 3.0
+    turb = _fbm(noise_x, noise_y) * 2.0 - 1.0
+
+    return 1.0 + _TURB_AMPLITUDE * turb
+
+
+@njit(cache=True)
+def novikov_thorne_emission(r, r_isco):
+    """Perfil de emision Novikov-Thorne para disco delgado en Schwarzschild.
+
+    T(r) = (r_isco/r)^(3/4) * (1 - sqrt(r_isco/r))^(1/4)
+
+    La condicion de torque cero en el ISCO hace que la emision caiga a cero
+    exactamente en r = r_isco, creando un borde interior oscuro realista.
+    """
+    ratio = r_isco / r
+    factor = 1.0 - np.sqrt(ratio)
+    if factor <= 0.0:
+        return 0.0
+    return ratio ** 0.75 * factor ** 0.25
+
+
+@njit(cache=True)
+def _starfield(direction_x, direction_y, direction_z):
+    """Campo estelar procedural para rayos escapados.
+
+    Genera estrellas pseudo-aleatorias basadas en la direccion del rayo.
+    """
+    # Coordenadas esfericas
+    theta_sky = np.arccos(max(-1.0, min(1.0, direction_z)))
+    phi_sky = np.arctan2(direction_y, direction_x)
+
+    cr, cg, cb = 0.0, 0.0, 0.0
+
+    for layer in range(3):
+        scale = 80.0 + layer * 60.0
+        cx = phi_sky * scale
+        cy = theta_sky * scale
+        ix = int(np.floor(cx))
+        iy = int(np.floor(cy))
+        fx = cx - ix
+        fy = cy - iy
+
+        seed1 = (0.13 + layer * 0.07)
+        seed2 = (0.27 + layer * 0.11)
+        seed3 = (0.41 + layer * 0.03)
+        h1 = ((ix * seed1 + iy * 0.73) * 12345.6789) % 1.0
+        if h1 < 0:
+            h1 += 1.0
+        h2 = ((ix * seed2 + iy * 0.31) * 67890.1234) % 1.0
+        if h2 < 0:
+            h2 += 1.0
+        h3 = ((ix * seed3 + iy * 0.57) * 13579.2468) % 1.0
+        if h3 < 0:
+            h3 += 1.0
+
+        if h1 > 0.85:
+            dx = fx - h2
+            dy = fy - h3
+            dist = np.sqrt(dx * dx + dy * dy)
+
+            if dist < 0.05:
+                brightness = max(0.0, 1.0 - dist / 0.05)
+                brightness = brightness * brightness  # smoothstep-like
+
+                temp_star = 3000.0 + h2 * 20000.0
+                sr, sg, sb = blackbody_rgb(temp_star)
+                magnitude = 0.3 + h3 * 0.7
+
+                cr += sr * brightness * magnitude
+                cg += sg * brightness * magnitude
+                cb += sb * brightness * magnitude
+
+    return min(cr, 1.0), min(cg, 1.0), min(cb, 1.0)
+
+
+@njit(cache=True)
 def _color_from_geodesic(
     phi, r, n_pts, e1, e2, cam_pos,
-    rs, m, r_inner, r_outer, base_temp, beaming_power,
+    rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
 ):
     """
     Calcula el color RGB de un pixel dada su geodesica pre-computada.
 
     Busca cruces con el disco, aplica efectos relativistas y colormap.
+    Si el rayo escapa sin cruzar el disco, muestra campo estelar de fondo.
     """
-    r_cross, psi_cross, n_cross = find_crossings(
+    r_cross, psi_cross, c_idx, n_cross = find_crossings(
         phi, r, n_pts, e1[2], e2[2], r_inner, r_outer,
     )
 
     if n_cross == 0:
+        if fate == 1:  # rayo escapado -> estrellas
+            phi_final = phi[n_pts - 1]
+            dx = np.cos(phi_final) * e1[0] + np.sin(phi_final) * e2[0]
+            dy = np.cos(phi_final) * e1[1] + np.sin(phi_final) * e2[1]
+            dz = np.cos(phi_final) * e1[2] + np.sin(phi_final) * e2[2]
+            return _starfield(dx, dy, dz)
         return 0.0, 0.0, 0.0
 
     # Primer cruce (mas cercano a la camara)
     r_hit = r_cross[0]
     psi_hit = psi_cross[0]
-    base_emission = (r_inner / r_hit) ** 0.75
+    base_emission = novikov_thorne_emission(r_hit, r_inner)
+    limb = _compute_limb_factor(psi_hit, e1, e2, phi, r, c_idx[0], n_pts)
 
     g = gravitational_redshift(r_hit, rs)
     D = doppler_factor(r_hit, psi_hit, e1, e2, cam_pos, m)
     g_d = g * D
 
-    intensity = base_emission * g_d ** beaming_power
+    turb = disk_turbulence(r_hit, psi_hit, e1, e2, m, t)
+    intensity = base_emission * limb * turb * g_d ** beaming_power
 
     # Contribucion de cruces adicionales (imagenes secundarias)
     for c in range(1, n_cross):
         g_extra = gravitational_redshift(r_cross[c], rs)
         D_extra = doppler_factor(r_cross[c], psi_cross[c], e1, e2, cam_pos, m)
         g_d_extra = g_extra * D_extra
-        extra_emission = (r_inner / r_cross[c]) ** 0.75
-        intensity += extra_emission * g_d_extra ** beaming_power * 0.5
+        extra_emission = novikov_thorne_emission(r_cross[c], r_inner)
+        limb_extra = _compute_limb_factor(psi_cross[c], e1, e2, phi, r, c_idx[c], n_pts)
+        turb_extra = disk_turbulence(r_cross[c], psi_cross[c], e1, e2, m, t)
+        intensity += extra_emission * limb_extra * turb_extra * g_d_extra ** beaming_power * 0.5
 
     if intensity > 1.0:
         intensity = 1.0
@@ -348,7 +547,7 @@ def _color_from_geodesic(
 def render_frame_parallel(
     b_arr, e1_arr, e2_arr, cam_pos,
     r_cam, rs, m, phi_max, n_steps,
-    r_inner, r_outer, base_temp, beaming_power,
+    r_inner, r_outer, base_temp, beaming_power, t=0.0,
 ):
     """
     Renderiza el frame completo en paralelo con Numba.
@@ -401,7 +600,7 @@ def render_frame_parallel(
         e2_left = e2_arr[j, i]
         cr, cg, cb = _color_from_geodesic(
             phi, r, n_valid, e1_left, e2_left, cam_pos,
-            rs, m, r_inner, r_outer, base_temp, beaming_power,
+            rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
         )
         image[j, i, 0] = cr
         image[j, i, 1] = cg
@@ -413,7 +612,7 @@ def render_frame_parallel(
             e2_right = e2_arr[j, i_mirror]
             cr, cg, cb = _color_from_geodesic(
                 phi, r, n_valid, e1_right, e2_right, cam_pos,
-                rs, m, r_inner, r_outer, base_temp, beaming_power,
+                rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
             )
             image[j, i_mirror, 0] = cr
             image[j, i_mirror, 1] = cg

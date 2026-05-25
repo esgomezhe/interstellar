@@ -31,10 +31,59 @@ uniform float u_beaming_power;  // exponente beaming (3.0)
 uniform int   u_n_steps;        // pasos RK4 por geodesica
 uniform float u_phi_max;        // angulo maximo de integracion
 uniform float u_gamma;          // correccion gamma
+uniform float u_time;           // tiempo para animacion del disco
 
 // --- Constantes ---
 const int MAX_CROSSINGS = 5;
 const float PI = 3.14159265359;
+const float TURB_AMPLITUDE = 0.2;  // amplitud de perturbacion turbulenta
+
+
+// =========================================================================
+// Ruido procedural (hash-based simplex-like)
+// =========================================================================
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise2d(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);  // smoothstep
+
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm(vec2 p) {
+    float val = 0.0;
+    float amp = 0.5;
+    for (int i = 0; i < 4; i++) {
+        val += amp * noise2d(p);
+        p *= 2.0;
+        amp *= 0.5;
+    }
+    return val;
+}
+
+float disk_turbulence(float r, float azimuth, float m, float time) {
+    // Rotacion diferencial kepleriana: Omega(r) = sqrt(M/r^3)
+    float omega = sqrt(m / (r * r * r));
+    float phi_rot = azimuth - omega * time;
+
+    // Coordenadas para el ruido: (log(r), phi_rot) para escala uniforme
+    vec2 noise_coord = vec2(log(r) * 4.0, phi_rot * 3.0);
+    float turb = fbm(noise_coord) * 2.0 - 1.0;  // [-1, 1]
+
+    return 1.0 + TURB_AMPLITUDE * turb;
+}
 
 
 // =========================================================================
@@ -172,12 +221,81 @@ float doppler_factor(float r_hit, float psi_hit, vec3 e1, vec3 e2, vec3 cam_pos,
 
 
 // =========================================================================
+// Limb darkening
+// =========================================================================
+
+float limb_darkening(float cos_theta_e) {
+    float mu = 0.5;
+    return (1.0 + mu * abs(cos_theta_e)) / (1.0 + mu);
+}
+
+
+// =========================================================================
+// Perfil de emision Novikov-Thorne
+// =========================================================================
+
+float novikov_thorne_emission(float r, float r_isco) {
+    float ratio = r_isco / r;
+    float factor = 1.0 - sqrt(ratio);
+    if (factor <= 0.0) return 0.0;
+    return pow(ratio, 0.75) * pow(factor, 0.25);
+}
+
+
+// =========================================================================
+// Campo estelar procedural
+// =========================================================================
+
+vec3 starfield(vec3 direction) {
+    // Coordenadas esfericas de la direccion del rayo escapado
+    float theta_sky = acos(clamp(direction.z, -1.0, 1.0));
+    float phi_sky = atan(direction.y, direction.x);
+
+    // Multiples capas de estrellas a diferentes escalas
+    vec3 color = vec3(0.0);
+
+    for (int layer = 0; layer < 3; layer++) {
+        float scale = 80.0 + float(layer) * 60.0;
+        vec2 cell = vec2(phi_sky, theta_sky) * scale;
+        vec2 cell_id = floor(cell);
+        vec2 cell_frac = fract(cell);
+
+        // Hash para posicion y brillo de estrella en esta celda
+        float h1 = hash21(cell_id * (0.13 + float(layer) * 0.07));
+        float h2 = hash21(cell_id * (0.27 + float(layer) * 0.11));
+        float h3 = hash21(cell_id * (0.41 + float(layer) * 0.03));
+
+        // Solo ~15% de celdas tienen estrella
+        if (h1 > 0.85) {
+            vec2 star_pos = vec2(h2, h3);
+            float dist = length(cell_frac - star_pos);
+
+            // Brillo basado en distancia (point-like)
+            float brightness = smoothstep(0.05, 0.0, dist);
+
+            // Variacion de color (estrellas calientes = azuladas, frias = rojizas)
+            float temp_star = 3000.0 + h2 * 20000.0;
+            vec3 star_color = blackbody_rgb(temp_star);
+
+            // Magnitud variable
+            float magnitude = 0.3 + h3 * 0.7;
+
+            color += star_color * brightness * magnitude;
+        }
+    }
+
+    return color;
+}
+
+
+// =========================================================================
 // Trazar geodesica y colorear pixel
 // =========================================================================
 
 vec3 trace_and_color(float b, vec3 e1, vec3 e2, vec3 cam_pos,
                      float r_cam, float rs, float m, float phi_max, int n_steps,
-                     float r_inner, float r_outer, float base_temp, float beaming_power)
+                     float r_inner, float r_outer, float base_temp, float beaming_power,
+                     float time)
 {
     // Condiciones iniciales
     float u0 = 1.0 / r_cam;
@@ -195,7 +313,12 @@ vec3 trace_and_color(float b, vec3 e1, vec3 e2, vec3 cam_pos,
     // Arrays para cruces ecuatoriales (tamano fijo en GLSL)
     float r_cross[MAX_CROSSINGS];
     float psi_cross[MAX_CROSSINGS];
+    float limb_factor[MAX_CROSSINGS];
     int n_cross = 0;
+
+    // Estado del rayo: 0=orbiting, 1=escaped, 2=captured
+    int ray_fate = 0;
+    float phi_final = 0.0;
 
     // z previa para deteccion de cruce
     float phi_prev = 0.0;
@@ -213,10 +336,10 @@ vec3 trace_and_color(float b, vec3 e1, vec3 e2, vec3 cam_pos,
         float phi_new = float(k + 1) * dphi;
 
         // Verificar captura
-        if (u_new >= u_capture) break;
+        if (u_new >= u_capture) { ray_fate = 2; break; }
 
         // Verificar escape
-        if (u_new < u_escape) break;
+        if (u_new < u_escape) { ray_fate = 1; phi_final = phi_new; break; }
 
         // Deteccion de cruce ecuatorial (cambio de signo en z)
         float z_new = r_new * (cos(phi_new) * e1.z + sin(phi_new) * e2.z);
@@ -231,6 +354,15 @@ vec3 trace_and_color(float b, vec3 e1, vec3 e2, vec3 cam_pos,
             if (rc >= r_inner && rc <= r_outer) {
                 r_cross[n_cross] = rc;
                 psi_cross[n_cross] = pc;
+
+                // Limb darkening: tangente del rayo en el cruce
+                vec3 p0 = r_prev * (cos(phi_prev) * e1 + sin(phi_prev) * e2);
+                vec3 p1 = r_new * (cos(phi_new) * e1 + sin(phi_new) * e2);
+                vec3 tangent = p1 - p0;
+                float t_len = length(tangent);
+                float cos_theta_e = (t_len > 1e-12) ? abs(tangent.z / t_len) : 1.0;
+                limb_factor[n_cross] = limb_darkening(cos_theta_e);
+
                 n_cross++;
             }
         }
@@ -242,27 +374,44 @@ vec3 trace_and_color(float b, vec3 e1, vec3 e2, vec3 cam_pos,
         du = du_new;
     }
 
-    // Sin cruces -> pixel negro
-    if (n_cross == 0) return vec3(0.0);
+    // Sin cruces con el disco
+    if (n_cross == 0) {
+        // Rayo escapado -> campo estelar de fondo
+        if (ray_fate == 1) {
+            vec3 d_final = cos(phi_final) * e1 + sin(phi_final) * e2;
+            return starfield(d_final);
+        }
+        return vec3(0.0);  // capturado -> negro
+    }
 
     // Primer cruce (mas cercano a la camara)
     float r_hit = r_cross[0];
     float psi_hit = psi_cross[0];
-    float base_emission = pow(r_inner / r_hit, 0.75);
+    float base_emission = novikov_thorne_emission(r_hit, r_inner);
 
     float g = gravitational_redshift(r_hit, rs);
     float D = doppler_factor(r_hit, psi_hit, e1, e2, cam_pos, m);
     float g_d = g * D;
 
-    float intensity = base_emission * pow(g_d, beaming_power);
+    // Turbulencia: calcular angulo azimutal del punto de impacto
+    vec3 hit_pos = r_hit * (cos(psi_hit) * e1 + sin(psi_hit) * e2);
+    float azimuth = atan(hit_pos.y, hit_pos.x);
+    float turb = disk_turbulence(r_hit, azimuth, m, time);
+
+    float intensity = base_emission * limb_factor[0] * turb * pow(g_d, beaming_power);
 
     // Cruces adicionales (imagenes secundarias)
     for (int c = 1; c < n_cross; c++) {
         float g_extra = gravitational_redshift(r_cross[c], rs);
         float D_extra = doppler_factor(r_cross[c], psi_cross[c], e1, e2, cam_pos, m);
         float g_d_extra = g_extra * D_extra;
-        float extra_emission = pow(r_inner / r_cross[c], 0.75);
-        intensity += extra_emission * pow(g_d_extra, beaming_power) * 0.5;
+        float extra_emission = novikov_thorne_emission(r_cross[c], r_inner);
+
+        vec3 hit_extra = r_cross[c] * (cos(psi_cross[c]) * e1 + sin(psi_cross[c]) * e2);
+        float az_extra = atan(hit_extra.y, hit_extra.x);
+        float turb_extra = disk_turbulence(r_cross[c], az_extra, m, time);
+
+        intensity += extra_emission * limb_factor[c] * turb_extra * pow(g_d_extra, beaming_power) * 0.5;
     }
 
     intensity = clamp(intensity, 0.0, 1.0);
@@ -335,7 +484,8 @@ void main() {
     vec3 color = trace_and_color(
         b, e1, e2, cam_pos,
         u_r_cam, u_rs, u_m, u_phi_max, u_n_steps,
-        u_r_inner, u_r_outer, u_base_temp, u_beaming_power
+        u_r_inner, u_r_outer, u_base_temp, u_beaming_power,
+        u_time
     );
 
     // Correccion gamma

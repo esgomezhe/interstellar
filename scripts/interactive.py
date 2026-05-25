@@ -90,7 +90,9 @@ def main() -> None:
     # --- Cargar shaders ---
     vert_src = load_shader("blackhole.vert")
     frag_src = load_shader("blackhole.frag")
+    bloom_frag_src = load_shader("bloom.frag")
     prog = ctx.program(vertex_shader=vert_src, fragment_shader=frag_src)
+    bloom_prog = ctx.program(vertex_shader=vert_src, fragment_shader=bloom_frag_src)
 
     # --- Fullscreen quad ---
     vertices = np.array([
@@ -101,6 +103,29 @@ def main() -> None:
     ], dtype="f4")
     vbo = ctx.buffer(vertices)
     vao = ctx.simple_vertex_array(prog, vbo, "in_position")
+    bloom_vao = ctx.simple_vertex_array(bloom_prog, vbo, "in_position")
+
+    # --- FBOs para bloom ---
+    bloom_threshold = 0.4
+    bloom_intensity = 0.6
+    fbo_cache = {"w": 0, "h": 0}
+
+    def create_bloom_fbos(w, h):
+        """Crea FBOs para el pipeline de bloom al tamano actual."""
+        fbo_cache["scene_tex"] = ctx.texture((w, h), 4, dtype="f2")
+        fbo_cache["scene_fbo"] = ctx.framebuffer(
+            color_attachments=[fbo_cache["scene_tex"]]
+        )
+        fbo_cache["bright_tex"] = ctx.texture((w, h), 4, dtype="f2")
+        fbo_cache["bright_fbo"] = ctx.framebuffer(
+            color_attachments=[fbo_cache["bright_tex"]]
+        )
+        fbo_cache["ping_tex"] = ctx.texture((w, h), 4, dtype="f2")
+        fbo_cache["ping_fbo"] = ctx.framebuffer(
+            color_attachments=[fbo_cache["ping_tex"]]
+        )
+        fbo_cache["w"] = w
+        fbo_cache["h"] = h
 
     # --- Callbacks ---
     def on_scroll(_win, _xoff, yoff):
@@ -162,6 +187,7 @@ def main() -> None:
     # --- Loop principal ---
     frame_count = 0
     fps_timer = time.perf_counter()
+    t_total_start = time.perf_counter()
     fps_display = 0.0
 
     print("=" * 60)
@@ -184,9 +210,14 @@ def main() -> None:
         if fb_w == 0 or fb_h == 0:
             continue
 
+        # Recrear FBOs si cambio el tamano
+        if fb_w != fbo_cache["w"] or fb_h != fbo_cache["h"]:
+            create_bloom_fbos(fb_w, fb_h)
+
+        # --- Pass 1: Render escena a FBO ---
+        fbo_cache["scene_fbo"].use()
         ctx.viewport = (0, 0, fb_w, fb_h)
 
-        # Pasar uniforms al shader
         prog["u_r_cam"].value = float(cam_r)
         prog["u_theta_cam"].value = float(cam_theta)
         prog["u_phi_cam"].value = float(cam_phi)
@@ -203,10 +234,50 @@ def main() -> None:
         prog["u_n_steps"].value = int(n_steps)
         prog["u_phi_max"].value = float(phi_max)
         prog["u_gamma"].value = float(gamma)
+        prog["u_time"].value = float(time.perf_counter() - t_total_start)
 
-        # Renderizar
         ctx.clear(0.0, 0.0, 0.0)
         vao.render(moderngl.TRIANGLE_STRIP)
+
+        texel_size = (1.0 / fb_w, 1.0 / fb_h)
+
+        # --- Pass 2: Extraer pixeles brillantes ---
+        fbo_cache["bright_fbo"].use()
+        fbo_cache["scene_tex"].use(location=0)
+        bloom_prog["u_texture"].value = 0
+        bloom_prog["u_mode"].value = 0
+        bloom_prog["u_threshold"].value = float(bloom_threshold)
+        bloom_prog["u_texel_size"].value = texel_size
+        ctx.clear(0.0, 0.0, 0.0)
+        bloom_vao.render(moderngl.TRIANGLE_STRIP)
+
+        # --- Pass 3: Blur horizontal ---
+        fbo_cache["ping_fbo"].use()
+        fbo_cache["bright_tex"].use(location=0)
+        bloom_prog["u_texture"].value = 0
+        bloom_prog["u_mode"].value = 1
+        ctx.clear(0.0, 0.0, 0.0)
+        bloom_vao.render(moderngl.TRIANGLE_STRIP)
+
+        # --- Pass 4: Blur vertical ---
+        fbo_cache["bright_fbo"].use()
+        fbo_cache["ping_tex"].use(location=0)
+        bloom_prog["u_texture"].value = 0
+        bloom_prog["u_mode"].value = 2
+        ctx.clear(0.0, 0.0, 0.0)
+        bloom_vao.render(moderngl.TRIANGLE_STRIP)
+
+        # --- Pass 5: Composicion final a pantalla ---
+        ctx.screen.use()
+        ctx.viewport = (0, 0, fb_w, fb_h)
+        fbo_cache["scene_tex"].use(location=0)
+        fbo_cache["bright_tex"].use(location=1)
+        bloom_prog["u_texture"].value = 0
+        bloom_prog["u_bloom_texture"].value = 1
+        bloom_prog["u_mode"].value = 3
+        bloom_prog["u_intensity"].value = float(bloom_intensity)
+        ctx.clear(0.0, 0.0, 0.0)
+        bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
         glfw.swap_buffers(window)
 

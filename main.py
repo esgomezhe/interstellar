@@ -255,20 +255,43 @@ def launch_gui() -> None:
 
     cards = []
 
+    PROTECTED_BG = {ACCENT, RUNNING_COLOR, "#2a6496"}
+
     def set_card_bg(card: tk.Frame, color: str) -> None:
         card.configure(bg=color)
         for child in card.winfo_children():
-            if isinstance(child, tk.Label) and child.cget("bg") not in (ACCENT, RUNNING_COLOR):
+            if isinstance(child, tk.Label) and child.cget("bg") not in PROTECTED_BG:
                 child.configure(bg=color)
             if isinstance(child, tk.Frame):
                 child.configure(bg=color)
                 for sub in child.winfo_children():
                     if isinstance(sub, (tk.Label, tk.Frame)):
-                        if sub.cget("bg") not in (ACCENT, RUNNING_COLOR):
+                        if sub.cget("bg") not in PROTECTED_BG:
                             sub.configure(bg=color)
                             for s2 in sub.winfo_children():
-                                if isinstance(s2, tk.Label) and s2.cget("bg") not in (ACCENT, RUNNING_COLOR):
+                                if isinstance(s2, tk.Label) and s2.cget("bg") not in PROTECTED_BG:
                                     s2.configure(bg=color)
+
+    def has_output(mode_key: str) -> bool:
+        output = OUTPUT_FILES.get(mode_key)
+        return output is not None and (ROOT / output).exists()
+
+    def view_output(mode_key: str) -> None:
+        output = OUTPUT_FILES.get(mode_key)
+        if output and (ROOT / output).exists():
+            open_viewer(output, mode_key.title())
+
+    def update_card_buttons():
+        """Actualiza los botones de cada card segun si el output existe."""
+        for _card, key, btn, view_btn in cards:
+            if key == "interactive":
+                continue
+            if has_output(key):
+                btn.configure(text="NEW")
+                view_btn.pack(side="right", padx=(0, 6))
+            else:
+                btn.configure(text="RUN")
+                view_btn.pack_forget()
 
     def run_task(mode_key: str, card_frame: tk.Frame, btn: tk.Label) -> None:
         if running_task["active"]:
@@ -278,7 +301,7 @@ def launch_gui() -> None:
         btn.configure(text="RUNNING...", bg=RUNNING_COLOR)
         status_var.set(f"Running: {mode_key}...")
 
-        for _, _, b in cards:
+        for _, _, b, _ in cards:
             b.configure(fg="#555555")
 
         def task():
@@ -301,10 +324,12 @@ def launch_gui() -> None:
                 root.after(0, lambda: status_var.set(f"Error: {e}"))
             finally:
                 running_task["active"] = False
-                root.after(0, lambda: btn.configure(text="RUN", bg=ACCENT))
-                root.after(0, lambda: [b.configure(fg=FG) for _, _, b in cards])
+                root.after(0, update_card_buttons)
+                root.after(0, lambda: [b.configure(fg=FG) for _, _, b, _ in cards])
 
         threading.Thread(target=task, daemon=True).start()
+
+    VIEW_BG = "#2a6496"
 
     for mode in modes:
         card = tk.Frame(container, bg=BG_CARD, cursor="hand2")
@@ -325,6 +350,13 @@ def launch_gui() -> None:
             padx=14, pady=4, cursor="hand2",
         )
         btn.pack(side="right", padx=14)
+
+        # Boton VIEW (solo para modos con output)
+        view_btn = tk.Label(
+            card, text="VIEW",
+            font=("Segoe UI", 9, "bold"), fg=FG, bg=VIEW_BG,
+            padx=14, pady=4, cursor="hand2",
+        )
 
         text_frame = tk.Frame(card, bg=BG_CARD)
         text_frame.pack(side="left", fill="both", expand=True, pady=10)
@@ -355,9 +387,17 @@ def launch_gui() -> None:
 
         key = mode["key"]
         btn.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
-        card.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
+        view_btn.bind("<Button-1>", lambda e, k=key: view_output(k))
 
-        cards.append((card, key, btn))
+        # Click en la card: si hay output, view; si no, run
+        card.bind("<Button-1>", lambda e, k=key, c=card, b=btn: (
+            view_output(k) if has_output(k) else run_task(k, c, b)
+        ))
+
+        cards.append((card, key, btn, view_btn))
+
+    # Estado inicial de los botones
+    update_card_buttons()
 
     root.mainloop()
 
