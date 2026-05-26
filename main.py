@@ -247,7 +247,7 @@ def launch_gui() -> None:
         {
             "key": "interactive",
             "title": "Interactive Viewer",
-            "desc": "Real-time GPU ray tracer with GLSL shaders.\nOrbit, zoom, explore the black hole freely.",
+            "desc": "Real-time GPU ray tracer with GLSL shaders.\nOrbit, zoom, F12 screenshot, F9 record video.",
             "icon": "*",
             "tag": "GPU  GLSL",
         },

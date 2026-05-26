@@ -10,16 +10,20 @@ Controles:
   - WASD: orbitar camara (alternativa al raton)
   - R: reset camara a posicion inicial
   - +/-: ajustar pasos RK4 (calidad vs rendimiento)
+  - F12: capturar screenshot (PNG)
+  - F9: iniciar/detener grabacion de video (MP4 + GIF)
   - ESC: salir
 """
 
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import glfw
 import moderngl
 import numpy as np
+from PIL import Image
 
 # Directorio raiz del proyecto
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +32,53 @@ ROOT = Path(__file__).resolve().parent.parent
 def load_shader(name: str) -> str:
     path = ROOT / "shaders" / name
     return path.read_text(encoding="utf-8")
+
+
+SCREENSHOTS_DIR = ROOT / "outputs" / "screenshots"
+RECORDINGS_DIR = ROOT / "outputs" / "recordings"
+
+
+def read_framebuffer(ctx, fb_w: int, fb_h: int) -> Image.Image:
+    """Lee los pixeles del framebuffer actual y devuelve una imagen PIL."""
+    raw = ctx.screen.read(viewport=(0, 0, fb_w, fb_h), components=3)
+    img = Image.frombytes("RGB", (fb_w, fb_h), raw)
+    return img.transpose(Image.FLIP_TOP_BOTTOM)
+
+
+def save_screenshot(ctx, fb_w: int, fb_h: int) -> Path:
+    """Captura el frame actual y lo guarda como PNG."""
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = SCREENSHOTS_DIR / f"screenshot_{timestamp}.png"
+    img = read_framebuffer(ctx, fb_w, fb_h)
+    img.save(path, "PNG")
+    return path
+
+
+def save_recording(frames: list, fps: int = 30) -> tuple[Path, Path]:
+    """Guarda una lista de frames PIL como MP4 y GIF."""
+    import imageio
+
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mp4_path = RECORDINGS_DIR / f"recording_{timestamp}.mp4"
+    gif_path = RECORDINGS_DIR / f"recording_{timestamp}.gif"
+
+    # MP4
+    writer = imageio.get_writer(str(mp4_path), fps=fps, codec="libx264",
+                                quality=8)
+    for frame in frames:
+        writer.append_data(np.array(frame))
+    writer.close()
+
+    # GIF (reducir fps para tamaño razonable)
+    gif_fps = min(fps, 15)
+    step = max(1, fps // gif_fps)
+    gif_frames = frames[::step]
+    imageio.mimsave(str(gif_path), [np.array(f) for f in gif_frames],
+                    duration=1000 // gif_fps, loop=0)
+
+    return mp4_path, gif_path
 
 
 def main() -> None:
@@ -62,6 +113,9 @@ def main() -> None:
     mouse_pressed = False
     last_mouse_x = 0.0
     last_mouse_y = 0.0
+
+    # --- Estado de grabacion ---
+    recording = {"active": False, "frames": [], "fps": 30}
 
     # --- Inicializar GLFW ---
     if not glfw.init():
@@ -155,6 +209,9 @@ def main() -> None:
         cam_phi -= dx * sensitivity
         cam_theta = np.clip(cam_theta + dy * sensitivity, theta_min, theta_max)
 
+    # Acciones pendientes desde callbacks (se procesan en el loop principal)
+    pending_actions = []
+
     def on_key(_win, key, _scancode, action, _mods):
         nonlocal cam_theta, cam_phi, cam_r, n_steps
         if action == glfw.RELEASE:
@@ -178,6 +235,10 @@ def main() -> None:
             n_steps = min(n_steps + 100, 3000)
         elif key in (glfw.KEY_MINUS, glfw.KEY_KP_SUBTRACT):
             n_steps = max(n_steps - 100, 200)
+        elif key == glfw.KEY_F12:
+            pending_actions.append("screenshot")
+        elif key == glfw.KEY_F9:
+            pending_actions.append("toggle_recording")
 
     glfw.set_scroll_callback(window, on_scroll)
     glfw.set_mouse_button_callback(window, on_mouse_button)
@@ -198,6 +259,8 @@ def main() -> None:
     print("  WASD: orbitar camara")
     print("  R: reset camara")
     print("  +/-: ajustar calidad (pasos RK4)")
+    print("  F12: capturar screenshot (PNG)")
+    print("  F9:  iniciar/detener grabacion de video")
     print("  ESC: salir")
     print("=" * 60)
 
@@ -281,6 +344,32 @@ def main() -> None:
 
         glfw.swap_buffers(window)
 
+        # --- Procesar acciones de captura ---
+        for act in pending_actions:
+            if act == "screenshot":
+                path = save_screenshot(ctx, fb_w, fb_h)
+                print(f"  [F12] Screenshot guardado: {path}")
+            elif act == "toggle_recording":
+                if not recording["active"]:
+                    recording["active"] = True
+                    recording["frames"] = []
+                    print("  [F9] Grabacion iniciada...")
+                else:
+                    recording["active"] = False
+                    n_frames = len(recording["frames"])
+                    print(f"  [F9] Grabacion detenida ({n_frames} frames). Codificando...")
+                    if n_frames > 0:
+                        mp4, gif = save_recording(recording["frames"],
+                                                  recording["fps"])
+                        print(f"        MP4: {mp4}")
+                        print(f"        GIF: {gif}")
+                    recording["frames"] = []
+        pending_actions.clear()
+
+        # Capturar frame si estamos grabando
+        if recording["active"]:
+            recording["frames"].append(read_framebuffer(ctx, fb_w, fb_h))
+
         # Frame limiter
         elapsed = time.perf_counter() - frame_start
         sleep_time = frame_time_min - elapsed
@@ -297,12 +386,20 @@ def main() -> None:
             fps_timer = now
             theta_deg = np.degrees(cam_theta)
             phi_deg = np.degrees(cam_phi) % 360
+            rec_tag = " | [REC]" if recording["active"] else ""
             glfw.set_window_title(
                 window,
                 f"Agujero Negro — {fps_display:.1f} FPS | "
                 f"r={cam_r:.1f} theta={theta_deg:.1f} phi={phi_deg:.1f} | "
-                f"RK4 steps={n_steps}"
+                f"RK4 steps={n_steps}{rec_tag}"
             )
+
+    # Guardar grabacion pendiente si se cerro la ventana mientras grababa
+    if recording["active"] and len(recording["frames"]) > 0:
+        print(f"\n  Grabacion activa al cerrar ({len(recording['frames'])} frames). Codificando...")
+        mp4, gif = save_recording(recording["frames"], recording["fps"])
+        print(f"  MP4: {mp4}")
+        print(f"  GIF: {gif}")
 
     glfw.terminate()
     print("\nSesion finalizada.")
