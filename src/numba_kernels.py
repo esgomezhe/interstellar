@@ -878,26 +878,34 @@ def kerr_doppler_factor(r_hit, phi_hit, theta_obs, a, m):
     Factor Doppler para gas en orbita Kepleriana en Kerr.
 
     Usa Omega_Kerr = sqrt(M) / (r^(3/2) + a*sqrt(M)) para orbita prograda.
+    El resultado se clampea a [0.1, 5.0] para evitar divergencias numericas
+    cerca del horizonte donde v_phi -> c.
     """
     sqrt_m = np.sqrt(m)
     r32 = r_hit ** 1.5
     omega = sqrt_m / (r32 + a * sqrt_m)  # progrado
 
-    # Velocidad lineal del gas: v_phi = r * omega * sin(theta)
-    # En el plano ecuatorial (theta = pi/2), v_phi = r * omega
+    # Velocidad lineal del gas en el plano ecuatorial: v_phi = r * omega
     v_phi = r_hit * omega
 
-    # Para el factor Doppler necesitamos v_phi / c y la proyeccion
-    # sobre la linea de vision. En el plano ecuatorial:
-    # v_dot_n ~ v_phi * sin(phi_hit) (componente hacia el observador)
-    # Esto es una aproximacion valida para observador lejano
-    v_dot_n = v_phi * np.sin(phi_hit)
+    # Clampear velocidad ANTES de usar en cualquier calculo
+    if v_phi >= 0.999:
+        v_phi = 0.999
 
-    if v_phi >= 1.0:
-        v_phi = 0.999  # proteccion
     gamma = 1.0 / np.sqrt(1.0 - v_phi * v_phi)
 
-    return 1.0 / (gamma * (1.0 - v_dot_n))
+    # Proyeccion sobre linea de vision (observador lejano)
+    v_dot_n = v_phi * np.sin(phi_hit)
+
+    D = 1.0 / (gamma * (1.0 - v_dot_n))
+
+    # Clamp fisicamente razonable: D < 0.1 o D > 5 es numerico, no fisico
+    if D < 0.1:
+        D = 0.1
+    elif D > 5.0:
+        D = 5.0
+
+    return D
 
 
 @njit(cache=True)
@@ -997,6 +1005,11 @@ def _kerr_color_from_geodesic(
     g = kerr_gravitational_redshift(r_hit, np.pi / 2.0, a, m)
     D = kerr_doppler_factor(r_hit, phi_hit, theta_cam, a, m)
     g_d = g * D
+    # Clamp g_d para que g_d^beaming_power no explote
+    if g_d < 0.05:
+        g_d = 0.05
+    elif g_d > 3.0:
+        g_d = 3.0
 
     turb = _kerr_disk_turbulence(r_hit, phi_hit, m, a, t)
     intensity = base_emission * limb * turb * g_d ** beaming_power
@@ -1006,17 +1019,27 @@ def _kerr_color_from_geodesic(
         g_extra = kerr_gravitational_redshift(r_cross[c], np.pi / 2.0, a, m)
         D_extra = kerr_doppler_factor(r_cross[c], phi_cross[c], theta_cam, a, m)
         g_d_extra = g_extra * D_extra
+        if g_d_extra < 0.05:
+            g_d_extra = 0.05
+        elif g_d_extra > 3.0:
+            g_d_extra = 3.0
         extra_emission = novikov_thorne_emission(r_cross[c], r_inner)
         limb_extra = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[c], n_pts)
         turb_extra = _kerr_disk_turbulence(r_cross[c], phi_cross[c], m, a, t)
         intensity += extra_emission * limb_extra * turb_extra * g_d_extra ** beaming_power * 0.5
 
-    if intensity > 1.0:
-        intensity = 1.0
+    # Usar tone mapping en lugar de clamp duro para preservar rango dinamico
+    # Reinhard: I_mapped = I / (1 + I)
     if intensity <= 0.0:
         return 0.0, 0.0, 0.0
+    intensity = intensity / (1.0 + intensity)
 
     temp_obs = base_temp * g_d
+    # Clamp temperatura a rango valido de blackbody_rgb
+    if temp_obs < 1000.0:
+        temp_obs = 1000.0
+    elif temp_obs > 40000.0:
+        temp_obs = 40000.0
     cr, cg, cb = blackbody_rgb(temp_obs)
     brightness = intensity ** 0.5
 
