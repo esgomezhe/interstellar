@@ -35,7 +35,7 @@ SCRIPT_MAP = {
     "kerr-geodesics":  "plot_geodesics_kerr",
     "kerr-frame":      "render_frame_kerr",
     "kerr-animation":  "render_animation_kerr",
-    "kerr-interactive": "interactive",
+    "kerr-interactive": "interactive_kerr",
 }
 
 OUTPUT_FILES = {
@@ -59,11 +59,13 @@ def run_mode(mode: str) -> None:
         print("Modos disponibles: " + ", ".join(SCRIPT_MAP.keys()))
         sys.exit(1)
 
-    sys.path.insert(0, str(SCRIPTS_DIR))
+    scripts_path = str(SCRIPTS_DIR)
+    sys.path.insert(0, scripts_path)
     # Limpiar sys.argv para que argparse en los scripts no vea el modo
     sys.argv = [sys.argv[0]] + sys.argv[2:]
     module = importlib.import_module(script_name)
-    sys.path.pop(0)
+    if scripts_path in sys.path:
+        sys.path.remove(scripts_path)
 
     if hasattr(module, "main"):
         module.main()
@@ -400,8 +402,11 @@ def launch_gui() -> None:
             open_viewer(output, mode_key.replace("-", " ").title())
 
     def update_card_buttons():
-        for _card, key, btn, view_btn in all_cards:
+        for _card, key, btn, view_btn, accent in all_cards:
+            # Restaurar color del boton (por si estaba en RUNNING)
+            btn.configure(bg=accent)
             if key in ("interactive", "kerr-interactive"):
+                btn.configure(text="RUN")
                 continue
             if has_output(key):
                 btn.configure(text="NEW")
@@ -418,7 +423,7 @@ def launch_gui() -> None:
         btn.configure(text="RUNNING...", bg=RUNNING_COLOR)
         status_var.set(f"Running: {mode_key}...")
 
-        for _, _, b, _ in all_cards:
+        for _, _, b, _, _ in all_cards:
             b.configure(fg="#555555")
 
         def task():
@@ -429,7 +434,9 @@ def launch_gui() -> None:
                     cwd=str(ROOT),
                 )
                 if proc.returncode == 0:
-                    root.after(0, lambda: status_var.set(f"Completed: {mode_key}"))
+                    is_viewer = mode_key in ("interactive", "kerr-interactive")
+                    msg = f"Closed: {mode_key}" if is_viewer else f"Completed: {mode_key}"
+                    root.after(0, lambda: status_var.set(msg))
                     output = OUTPUT_FILES.get(mode_key)
                     if output:
                         root.after(100, lambda: open_viewer(output, mode_key.replace("-", " ").title()))
@@ -442,7 +449,7 @@ def launch_gui() -> None:
             finally:
                 running_task["active"] = False
                 root.after(0, update_card_buttons)
-                root.after(0, lambda: [b.configure(fg=FG) for _, _, b, _ in all_cards])
+                root.after(0, lambda: [b.configure(fg=FG) for _, _, b, _, _ in all_cards])
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -511,7 +518,7 @@ def launch_gui() -> None:
                 view_output(k) if has_output(k) else run_task(k, c, b)
             ))
 
-            all_cards.append((card, key, btn, view_btn))
+            all_cards.append((card, key, btn, view_btn, accent))
 
     # --- Crear pestanas ---
     tab_sch = tk.Frame(tab_container, bg=BG)
