@@ -13,6 +13,7 @@ Uso:
   python main.py interactive       # renderer interactivo GPU
   python main.py kerr-geodesics    # geodesicas Kerr
   python main.py kerr-frame         # frame Kerr (Numba CPU)
+  python main.py kerr-animation     # animacion Kerr
 """
 
 import sys
@@ -33,6 +34,7 @@ SCRIPT_MAP = {
     # Kerr
     "kerr-geodesics":  "plot_geodesics_kerr",
     "kerr-frame":      "render_frame_kerr",
+    "kerr-animation":  "render_animation_kerr",
     "kerr-interactive": "interactive",
 }
 
@@ -44,6 +46,7 @@ OUTPUT_FILES = {
     # Kerr
     "kerr-geodesics": "outputs/geodesic_plots/kerr_geodesics.png",
     "kerr-frame":     "outputs/frames/frame_kerr.png",
+    "kerr-animation": "outputs/animation_kerr.gif",
 }
 
 
@@ -349,6 +352,13 @@ def launch_gui() -> None:
             "title": "Single Frame",
             "desc": "Render one static frame with Kerr metric.\nDynamic ISCO, frame-dragging, Doppler beaming.",
             "icon": "#",
+            "tag": "CPU  NUMBA",
+        },
+        {
+            "key": "kerr-animation",
+            "title": "Cinematic Animation",
+            "desc": "10-second Kerr animation (240 frames, 24 fps).\nCamera orbit with frame-dragging + bloom.",
+            "icon": ">",
             "tag": "CPU  NUMBA",
         },
         {
