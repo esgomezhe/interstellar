@@ -12,6 +12,7 @@ Uso:
   python main.py animation         # animacion Schwarzschild
   python main.py interactive       # renderer interactivo GPU
   python main.py kerr-geodesics    # geodesicas Kerr
+  python main.py kerr-frame         # frame Kerr (Numba CPU)
 """
 
 import sys
@@ -31,6 +32,7 @@ SCRIPT_MAP = {
     "interactive":     "interactive",
     # Kerr
     "kerr-geodesics":  "plot_geodesics_kerr",
+    "kerr-frame":      "render_frame_kerr",
     "kerr-interactive": "interactive",
 }
 
@@ -41,6 +43,7 @@ OUTPUT_FILES = {
     "animation": "outputs/animation.gif",
     # Kerr
     "kerr-geodesics": "outputs/geodesic_plots/kerr_geodesics.png",
+    "kerr-frame":     "outputs/frames/frame_kerr.png",
 }
 
 
@@ -54,6 +57,8 @@ def run_mode(mode: str) -> None:
         sys.exit(1)
 
     sys.path.insert(0, str(SCRIPTS_DIR))
+    # Limpiar sys.argv para que argparse en los scripts no vea el modo
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
     module = importlib.import_module(script_name)
     sys.path.pop(0)
 
@@ -338,6 +343,13 @@ def launch_gui() -> None:
             "desc": "Photon trajectories in Kerr spacetime.\nShows frame-dragging asymmetry (pro vs retro).",
             "icon": "~",
             "tag": "CPU",
+        },
+        {
+            "key": "kerr-frame",
+            "title": "Single Frame",
+            "desc": "Render one static frame with Kerr metric.\nDynamic ISCO, frame-dragging, Doppler beaming.",
+            "icon": "#",
+            "tag": "CPU  NUMBA",
         },
         {
             "key": "kerr-interactive",
