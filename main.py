@@ -1,18 +1,22 @@
 """
-Punto de entrada principal para la simulacion del agujero negro de Schwarzschild.
+Punto de entrada principal para la simulacion de agujeros negros.
+
+Soporta dos metricas:
+  - Schwarzschild (agujero negro no rotacional)
+  - Kerr (agujero negro rotacional)
 
 Uso:
-  python main.py                   # interfaz grafica
-  python main.py geodesics         # graficar geodesicas
-  python main.py frame             # renderizar un frame (Numba CPU)
-  python main.py animation         # animacion cinematografica 10s
-  python main.py interactive       # renderer interactivo GPU (GLSL)
+  python main.py                   # interfaz grafica con pestanas
+  python main.py geodesics         # geodesicas Schwarzschild
+  python main.py frame             # frame Schwarzschild (Numba CPU)
+  python main.py animation         # animacion Schwarzschild
+  python main.py interactive       # renderer interactivo GPU
+  python main.py kerr-geodesics    # geodesicas Kerr
 """
 
 import sys
 import subprocess
 import threading
-import importlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -20,23 +24,33 @@ SCRIPTS_DIR = ROOT / "scripts"
 OUTPUTS_DIR = ROOT / "outputs"
 
 SCRIPT_MAP = {
-    "geodesics":   "plot_geodesics",
-    "frame":       "render_frame",
-    "animation":   "render_animation",
-    "interactive": "interactive",
+    # Schwarzschild
+    "geodesics":       "plot_geodesics",
+    "frame":           "render_frame",
+    "animation":       "render_animation",
+    "interactive":     "interactive",
+    # Kerr
+    "kerr-geodesics":  "plot_geodesics_kerr",
+    "kerr-interactive": "interactive",
 }
 
 OUTPUT_FILES = {
+    # Schwarzschild
     "geodesics": "outputs/geodesic_plots/phase1_geodesics.png",
     "frame":     "outputs/frames/frame_numba.png",
     "animation": "outputs/animation.gif",
+    # Kerr
+    "kerr-geodesics": "outputs/geodesic_plots/kerr_geodesics.png",
 }
 
 
 def run_mode(mode: str) -> None:
+    import importlib
+
     script_name = SCRIPT_MAP.get(mode)
     if not script_name:
         print(f"Modo desconocido: '{mode}'")
+        print("Modos disponibles: " + ", ".join(SCRIPT_MAP.keys()))
         sys.exit(1)
 
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -60,16 +74,18 @@ def launch_gui() -> None:
     BG_HOVER = "#252525"
     FG = "#e0e0e0"
     FG_DIM = "#808080"
-    ACCENT = "#d4a017"
+    ACCENT_SCH = "#d4a017"     # dorado para Schwarzschild
+    ACCENT_KERR = "#1a9fd4"    # azul para Kerr
     RUNNING_COLOR = "#3a7d3a"
+    VIEW_BG = "#2a6496"
 
     # --- Ventana principal ---
     root = tk.Tk()
-    root.title("Schwarzschild Black Hole")
+    root.title("Black Hole Simulation")
     root.configure(bg=BG)
     root.resizable(False, False)
 
-    win_w, win_h = 520, 580
+    win_w, win_h = 540, 620
     screen_w = root.winfo_screenwidth()
     screen_h = root.winfo_screenheight()
     x = (screen_w - win_w) // 2
@@ -91,12 +107,10 @@ def launch_gui() -> None:
         viewer.title(title)
         viewer.configure(bg="#000000")
 
-        # Escalar para que quepa en pantalla con margen
         max_w = int(screen_w * 0.85)
         max_h = int(screen_h * 0.85)
 
         if is_gif:
-            # Extraer frames y duracion
             frames_pil = []
             try:
                 while True:
@@ -106,9 +120,7 @@ def launch_gui() -> None:
             except EOFError:
                 pass
 
-            duration = img.info.get("duration", 42)  # ms por frame
-
-            # Escalar todos los frames
+            duration = img.info.get("duration", 42)
             orig_w, orig_h = frames_pil[0].size
             scale = min(max_w / orig_w, max_h / orig_h, 1.0)
             disp_w = int(orig_w * scale)
@@ -126,7 +138,6 @@ def launch_gui() -> None:
             canvas = tk.Label(viewer, bg="#000000")
             canvas.pack(expand=True)
 
-            # Barra de control
             ctrl = tk.Frame(viewer, bg="#111111", height=36)
             ctrl.pack(fill="x", side="bottom")
             ctrl.pack_propagate(False)
@@ -135,8 +146,7 @@ def launch_gui() -> None:
             frame_idx = {"i": 0}
 
             info_label = tk.Label(
-                ctrl,
-                text=f"Frame 1/{len(frames_tk)}",
+                ctrl, text=f"Frame 1/{len(frames_tk)}",
                 font=("Consolas", 9), fg=FG_DIM, bg="#111111",
             )
             info_label.pack(side="left", padx=10)
@@ -147,7 +157,7 @@ def launch_gui() -> None:
 
             play_btn = tk.Label(
                 ctrl, text="||",
-                font=("Consolas", 10, "bold"), fg=FG, bg=ACCENT,
+                font=("Consolas", 10, "bold"), fg=FG, bg=ACCENT_SCH,
                 padx=10, pady=2, cursor="hand2",
             )
             play_btn.pack(side="right", padx=10, pady=4)
@@ -166,7 +176,6 @@ def launch_gui() -> None:
             animate()
 
         else:
-            # Imagen estatica
             img = img.convert("RGBA")
             orig_w, orig_h = img.size
             scale = min(max_w / orig_w, max_h / orig_h, 1.0)
@@ -181,28 +190,28 @@ def launch_gui() -> None:
 
             photo = ImageTk.PhotoImage(img)
             label = tk.Label(viewer, image=photo, bg="#000000")
-            label.image = photo  # keep reference
+            label.image = photo
             label.pack(expand=True)
 
     # ------------------------------------------------------------------
     # Header
     # ------------------------------------------------------------------
     header = tk.Frame(root, bg=BG)
-    header.pack(fill="x", padx=30, pady=(28, 0))
+    header.pack(fill="x", padx=30, pady=(24, 0))
 
     tk.Label(
-        header, text="SCHWARZSCHILD",
-        font=("Segoe UI", 22, "bold"), fg=ACCENT, bg=BG,
+        header, text="BLACK HOLE",
+        font=("Segoe UI", 22, "bold"), fg="#ffffff", bg=BG,
         anchor="w",
     ).pack(fill="x")
 
     tk.Label(
-        header, text="BLACK HOLE SIMULATION",
+        header, text="SIMULATION",
         font=("Segoe UI", 10), fg=FG_DIM, bg=BG,
         anchor="w",
     ).pack(fill="x", pady=(0, 4))
 
-    tk.Frame(root, bg=ACCENT, height=1).pack(fill="x", padx=30, pady=(8, 20))
+    tk.Frame(root, bg="#444444", height=1).pack(fill="x", padx=30, pady=(8, 12))
 
     # --- Estado global ---
     status_var = tk.StringVar(value="")
@@ -210,7 +219,7 @@ def launch_gui() -> None:
 
     # --- Status bar ---
     status_frame = tk.Frame(root, bg=BG)
-    status_frame.pack(fill="x", padx=30, side="bottom", pady=(0, 18))
+    status_frame.pack(fill="x", padx=30, side="bottom", pady=(0, 14))
 
     status_label = tk.Label(
         status_frame, textvariable=status_var,
@@ -218,11 +227,80 @@ def launch_gui() -> None:
     )
     status_label.pack(fill="x")
 
-    # --- Cards container ---
-    container = tk.Frame(root, bg=BG)
-    container.pack(fill="both", expand=True, padx=30, pady=(0, 10))
+    # ------------------------------------------------------------------
+    # Custom tab bar
+    # ------------------------------------------------------------------
+    tabs_data = [
+        {"id": "schwarzschild", "label": "SCHWARZSCHILD", "accent": ACCENT_SCH},
+        {"id": "kerr",          "label": "KERR",          "accent": ACCENT_KERR},
+    ]
+    active_tab = {"id": tabs_data[0]["id"]}
+    tab_frames: dict[str, tk.Frame] = {}
+    tab_buttons: dict[str, dict] = {}
 
-    modes = [
+    tab_bar = tk.Frame(root, bg=BG)
+    tab_bar.pack(fill="x", padx=30, pady=(0, 0))
+
+    def switch_tab(tab_id: str) -> None:
+        active_tab["id"] = tab_id
+        for tid, widgets in tab_buttons.items():
+            is_active = tid == tab_id
+            accent = widgets["accent"]
+            widgets["label_w"].configure(
+                fg="#ffffff" if is_active else FG_DIM,
+            )
+            widgets["indicator"].configure(
+                bg=accent if is_active else BG,
+            )
+        for tid, frame in tab_frames.items():
+            if tid == tab_id:
+                frame.pack(fill="both", expand=True)
+            else:
+                frame.pack_forget()
+
+    for tab in tabs_data:
+        btn_frame = tk.Frame(tab_bar, bg=BG, cursor="hand2")
+        btn_frame.pack(side="left", padx=(0, 2))
+
+        lbl = tk.Label(
+            btn_frame, text=tab["label"],
+            font=("Segoe UI", 10, "bold"), fg=FG_DIM, bg=BG,
+            padx=16, pady=8,
+        )
+        lbl.pack()
+
+        indicator = tk.Frame(btn_frame, bg=BG, height=3)
+        indicator.pack(fill="x")
+        indicator.pack_propagate(False)
+
+        tab_buttons[tab["id"]] = {
+            "label_w": lbl, "indicator": indicator, "accent": tab["accent"],
+        }
+
+        def on_enter(e, tid=tab["id"], accent=tab["accent"]):
+            if active_tab["id"] != tid:
+                tab_buttons[tid]["label_w"].configure(fg="#b0b0b0")
+                tab_buttons[tid]["indicator"].configure(bg="#333333")
+
+        def on_leave(e, tid=tab["id"]):
+            if active_tab["id"] != tid:
+                tab_buttons[tid]["label_w"].configure(fg=FG_DIM)
+                tab_buttons[tid]["indicator"].configure(bg=BG)
+
+        for w in (btn_frame, lbl):
+            w.bind("<Button-1>", lambda e, tid=tab["id"]: switch_tab(tid))
+            w.bind("<Enter>", on_enter)
+            w.bind("<Leave>", on_leave)
+
+    # Separator below tab bar
+    tk.Frame(root, bg="#2a2a2a", height=1).pack(fill="x", padx=30)
+
+    # Container for tab content
+    tab_container = tk.Frame(root, bg=BG)
+    tab_container.pack(fill="both", expand=True, padx=30, pady=(0, 8))
+
+    # --- Definicion de modos por metrica ---
+    schwarzschild_modes = [
         {
             "key": "geodesics",
             "title": "Geodesics",
@@ -253,9 +331,27 @@ def launch_gui() -> None:
         },
     ]
 
-    cards = []
+    kerr_modes = [
+        {
+            "key": "kerr-geodesics",
+            "title": "Geodesics",
+            "desc": "Photon trajectories in Kerr spacetime.\nShows frame-dragging asymmetry (pro vs retro).",
+            "icon": "~",
+            "tag": "CPU",
+        },
+        {
+            "key": "kerr-interactive",
+            "title": "Interactive Viewer",
+            "desc": "Real-time GPU ray tracer for Kerr metric.\nKeys 0-9 adjust spin, F12 screenshot, F9 record.",
+            "icon": "*",
+            "tag": "GPU  GLSL",
+        },
+    ]
 
-    PROTECTED_BG = {ACCENT, RUNNING_COLOR, "#2a6496"}
+    PROTECTED_BG = {ACCENT_SCH, ACCENT_KERR, RUNNING_COLOR, VIEW_BG}
+
+    # Almacen global de cards para actualizar botones
+    all_cards = []
 
     def set_card_bg(card: tk.Frame, color: str) -> None:
         card.configure(bg=color)
@@ -279,12 +375,11 @@ def launch_gui() -> None:
     def view_output(mode_key: str) -> None:
         output = OUTPUT_FILES.get(mode_key)
         if output and (ROOT / output).exists():
-            open_viewer(output, mode_key.title())
+            open_viewer(output, mode_key.replace("-", " ").title())
 
     def update_card_buttons():
-        """Actualiza los botones de cada card segun si el output existe."""
-        for _card, key, btn, view_btn in cards:
-            if key == "interactive":
+        for _card, key, btn, view_btn in all_cards:
+            if key in ("interactive", "kerr-interactive"):
                 continue
             if has_output(key):
                 btn.configure(text="NEW")
@@ -301,7 +396,7 @@ def launch_gui() -> None:
         btn.configure(text="RUNNING...", bg=RUNNING_COLOR)
         status_var.set(f"Running: {mode_key}...")
 
-        for _, _, b, _ in cards:
+        for _, _, b, _ in all_cards:
             b.configure(fg="#555555")
 
         def task():
@@ -315,7 +410,7 @@ def launch_gui() -> None:
                     root.after(0, lambda: status_var.set(f"Completed: {mode_key}"))
                     output = OUTPUT_FILES.get(mode_key)
                     if output:
-                        root.after(100, lambda: open_viewer(output, mode_key.title()))
+                        root.after(100, lambda: open_viewer(output, mode_key.replace("-", " ").title()))
                 else:
                     root.after(0, lambda: status_var.set(
                         f"Error running {mode_key} (code {proc.returncode})"
@@ -325,79 +420,101 @@ def launch_gui() -> None:
             finally:
                 running_task["active"] = False
                 root.after(0, update_card_buttons)
-                root.after(0, lambda: [b.configure(fg=FG) for _, _, b, _ in cards])
+                root.after(0, lambda: [b.configure(fg=FG) for _, _, b, _ in all_cards])
 
         threading.Thread(target=task, daemon=True).start()
 
-    VIEW_BG = "#2a6496"
+    def build_tab(parent: tk.Frame, modes: list[dict], accent: str) -> None:
+        """Construye las cards de una pestana."""
+        parent.configure(bg=BG)
 
-    for mode in modes:
-        card = tk.Frame(container, bg=BG_CARD, cursor="hand2")
-        card.pack(fill="x", pady=5)
-        card.pack_propagate(False)
-        card.configure(height=90)
+        for mode in modes:
+            card = tk.Frame(parent, bg=BG_CARD, cursor="hand2")
+            card.pack(fill="x", pady=5, padx=4)
+            card.pack_propagate(False)
+            card.configure(height=90)
 
-        icon_label = tk.Label(
-            card, text=mode["icon"],
-            font=("Consolas", 20, "bold"), fg=ACCENT, bg=BG_CARD,
-            width=3,
-        )
-        icon_label.pack(side="left", padx=(12, 4))
+            icon_label = tk.Label(
+                card, text=mode["icon"],
+                font=("Consolas", 20, "bold"), fg=accent, bg=BG_CARD,
+                width=3,
+            )
+            icon_label.pack(side="left", padx=(12, 4))
 
-        btn = tk.Label(
-            card, text="RUN",
-            font=("Segoe UI", 9, "bold"), fg=FG, bg=ACCENT,
-            padx=14, pady=4, cursor="hand2",
-        )
-        btn.pack(side="right", padx=14)
+            btn = tk.Label(
+                card, text="RUN",
+                font=("Segoe UI", 9, "bold"), fg=FG, bg=accent,
+                padx=14, pady=4, cursor="hand2",
+            )
+            btn.pack(side="right", padx=14)
 
-        # Boton VIEW (solo para modos con output)
-        view_btn = tk.Label(
-            card, text="VIEW",
-            font=("Segoe UI", 9, "bold"), fg=FG, bg=VIEW_BG,
-            padx=14, pady=4, cursor="hand2",
-        )
+            view_btn = tk.Label(
+                card, text="VIEW",
+                font=("Segoe UI", 9, "bold"), fg=FG, bg=VIEW_BG,
+                padx=14, pady=4, cursor="hand2",
+            )
 
-        text_frame = tk.Frame(card, bg=BG_CARD)
-        text_frame.pack(side="left", fill="both", expand=True, pady=10)
+            text_frame = tk.Frame(card, bg=BG_CARD)
+            text_frame.pack(side="left", fill="both", expand=True, pady=10)
 
-        title_row = tk.Frame(text_frame, bg=BG_CARD)
-        title_row.pack(fill="x", anchor="w")
+            title_row = tk.Frame(text_frame, bg=BG_CARD)
+            title_row.pack(fill="x", anchor="w")
 
-        tk.Label(
-            title_row, text=mode["title"],
-            font=("Segoe UI", 12, "bold"), fg=FG, bg=BG_CARD,
-            anchor="w",
-        ).pack(side="left")
+            tk.Label(
+                title_row, text=mode["title"],
+                font=("Segoe UI", 12, "bold"), fg=FG, bg=BG_CARD,
+                anchor="w",
+            ).pack(side="left")
 
-        tk.Label(
-            title_row, text=mode["tag"],
-            font=("Consolas", 8), fg=FG_DIM, bg=BG_CARD,
-            anchor="w", padx=8,
-        ).pack(side="left")
+            tk.Label(
+                title_row, text=mode["tag"],
+                font=("Consolas", 8), fg=FG_DIM, bg=BG_CARD,
+                anchor="w", padx=8,
+            ).pack(side="left")
 
-        tk.Label(
-            text_frame, text=mode["desc"],
-            font=("Segoe UI", 9), fg=FG_DIM, bg=BG_CARD,
-            anchor="w", justify="left",
-        ).pack(fill="x", anchor="w")
+            tk.Label(
+                text_frame, text=mode["desc"],
+                font=("Segoe UI", 9), fg=FG_DIM, bg=BG_CARD,
+                anchor="w", justify="left",
+            ).pack(fill="x", anchor="w")
 
-        card.bind("<Enter>", lambda e, c=card: set_card_bg(c, BG_HOVER))
-        card.bind("<Leave>", lambda e, c=card: set_card_bg(c, BG_CARD))
+            card.bind("<Enter>", lambda e, c=card: set_card_bg(c, BG_HOVER))
+            card.bind("<Leave>", lambda e, c=card: set_card_bg(c, BG_CARD))
 
-        key = mode["key"]
-        btn.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
-        view_btn.bind("<Button-1>", lambda e, k=key: view_output(k))
+            key = mode["key"]
+            btn.bind("<Button-1>", lambda e, k=key, c=card, b=btn: run_task(k, c, b))
+            view_btn.bind("<Button-1>", lambda e, k=key: view_output(k))
 
-        # Click en la card: si hay output, view; si no, run
-        card.bind("<Button-1>", lambda e, k=key, c=card, b=btn: (
-            view_output(k) if has_output(k) else run_task(k, c, b)
-        ))
+            card.bind("<Button-1>", lambda e, k=key, c=card, b=btn: (
+                view_output(k) if has_output(k) else run_task(k, c, b)
+            ))
 
-        cards.append((card, key, btn, view_btn))
+            all_cards.append((card, key, btn, view_btn))
 
-    # Estado inicial de los botones
+    # --- Crear pestanas ---
+    tab_sch = tk.Frame(tab_container, bg=BG)
+    tab_kerr = tk.Frame(tab_container, bg=BG)
+
+    tab_frames["schwarzschild"] = tab_sch
+    tab_frames["kerr"] = tab_kerr
+
+    # Subtitulos dentro de cada pestana
+    tk.Label(
+        tab_sch, text="Non-rotating black hole  (a = 0)",
+        font=("Segoe UI", 9), fg=FG_DIM, bg=BG, anchor="w",
+    ).pack(fill="x", padx=8, pady=(10, 4))
+
+    tk.Label(
+        tab_kerr, text="Rotating black hole  (a = 0 ... 0.998)",
+        font=("Segoe UI", 9), fg=FG_DIM, bg=BG, anchor="w",
+    ).pack(fill="x", padx=8, pady=(10, 4))
+
+    build_tab(tab_sch, schwarzschild_modes, ACCENT_SCH)
+    build_tab(tab_kerr, kerr_modes, ACCENT_KERR)
+
+    # Estado inicial de los botones y pestana activa
     update_card_buttons()
+    switch_tab("schwarzschild")
 
     root.mainloop()
 

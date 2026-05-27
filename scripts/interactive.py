@@ -1,5 +1,5 @@
 """
-Renderer interactivo en tiempo real del agujero negro de Schwarzschild.
+Renderer interactivo en tiempo real del agujero negro (Schwarzschild + Kerr).
 
 Usa ModernGL + GLFW para renderizar el ray tracer como fragment shader GLSL.
 Cada pixel ejecuta la integracion RK4 de geodesicas en la GPU.
@@ -10,6 +10,7 @@ Controles:
   - WASD: orbitar camara (alternativa al raton)
   - R: reset camara a posicion inicial
   - +/-: ajustar pasos RK4 (calidad vs rendimiento)
+  - 0-9: ajustar spin del agujero negro (0=Schwarzschild, 9=Gargantua a=0.998)
   - F12: capturar screenshot (PNG)
   - F9: iniciar/detener grabacion de video (MP4 + GIF)
   - ESC: salir
@@ -27,6 +28,10 @@ from PIL import Image
 
 # Directorio raiz del proyecto
 ROOT = Path(__file__).resolve().parent.parent
+
+# Importar constantes de Kerr
+sys.path.insert(0, str(ROOT / "src"))
+from constants import kerr_isco
 
 
 def load_shader(name: str) -> str:
@@ -91,14 +96,19 @@ def main() -> None:
     # --- Parametros fisicos ---
     rs = 2.0
     m = 1.0
-    r_inner = 6.0       # ISCO
+    spin = 0.0           # parametro de spin a (0 = Schwarzschild, 0.998 = Gargantua)
+    r_inner = 6.0        # ISCO (se actualiza con spin)
     r_outer = 20.0
     base_temp = 2200.0
     beaming_power = 3.0
 
+    # Tabla de spin: teclas 0-9
+    SPIN_VALUES = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.998]
+
     # --- Parametros de render ---
     n_steps = 3000      # pasos RK4 (GPU permite alta calidad)
     phi_max = 50.0
+    lam_max = 300.0     # parametro afin maximo para Kerr
     gamma = 0.45
     target_fps = 120
     frame_time_min = 1.0 / target_fps
@@ -129,7 +139,7 @@ def main() -> None:
     glfw.window_hint(glfw.RESIZABLE, True)
 
     win_w, win_h = 960, 540
-    window = glfw.create_window(win_w, win_h, "Agujero Negro de Schwarzschild — Interactivo", None, None)
+    window = glfw.create_window(win_w, win_h, "Agujero Negro — Interactivo", None, None)
     if not window:
         glfw.terminate()
         print("Error: no se pudo crear la ventana GLFW")
@@ -212,8 +222,16 @@ def main() -> None:
     # Acciones pendientes desde callbacks (se procesan en el loop principal)
     pending_actions = []
 
+    def update_isco():
+        """Recalcula ISCO basado en el spin actual."""
+        nonlocal r_inner
+        if spin < 1e-6:
+            r_inner = 6.0  # Schwarzschild ISCO
+        else:
+            r_inner = kerr_isco(spin, m, prograde=True)
+
     def on_key(_win, key, _scancode, action, _mods):
-        nonlocal cam_theta, cam_phi, cam_r, n_steps
+        nonlocal cam_theta, cam_phi, cam_r, n_steps, spin
         if action == glfw.RELEASE:
             return
         step_angle = np.radians(2.0)
@@ -231,6 +249,8 @@ def main() -> None:
             cam_r = 30.0
             cam_theta = np.radians(75.0)
             cam_phi = 0.0
+            spin = 0.0
+            update_isco()
         elif key in (glfw.KEY_EQUAL, glfw.KEY_KP_ADD):
             n_steps = min(n_steps + 100, 3000)
         elif key in (glfw.KEY_MINUS, glfw.KEY_KP_SUBTRACT):
@@ -239,6 +259,12 @@ def main() -> None:
             pending_actions.append("screenshot")
         elif key == glfw.KEY_F9:
             pending_actions.append("toggle_recording")
+        # Teclas 0-9: ajustar spin
+        elif glfw.KEY_0 <= key <= glfw.KEY_9:
+            idx = key - glfw.KEY_0
+            spin = SPIN_VALUES[idx]
+            update_isco()
+            print(f"  Spin = {spin:.3f} | ISCO = {r_inner:.3f}")
 
     glfw.set_scroll_callback(window, on_scroll)
     glfw.set_mouse_button_callback(window, on_mouse_button)
@@ -252,13 +278,14 @@ def main() -> None:
     fps_display = 0.0
 
     print("=" * 60)
-    print("  Agujero Negro de Schwarzschild — Renderer Interactivo")
+    print("  Agujero Negro — Renderer Interactivo (Schwarzschild/Kerr)")
     print("=" * 60)
     print("Controles:")
     print("  Raton: arrastrar para orbitar, scroll para zoom")
     print("  WASD: orbitar camara")
-    print("  R: reset camara")
+    print("  R: reset camara y spin")
     print("  +/-: ajustar calidad (pasos RK4)")
+    print("  0-9: spin (0=Schwarzschild, 9=Gargantua a=0.998)")
     print("  F12: capturar screenshot (PNG)")
     print("  F9:  iniciar/detener grabacion de video")
     print("  ESC: salir")
@@ -289,6 +316,7 @@ def main() -> None:
 
         prog["u_rs"].value = float(rs)
         prog["u_m"].value = float(m)
+        prog["u_spin"].value = float(spin)
         prog["u_r_inner"].value = float(r_inner)
         prog["u_r_outer"].value = float(r_outer)
         prog["u_base_temp"].value = float(base_temp)
@@ -296,6 +324,12 @@ def main() -> None:
 
         prog["u_n_steps"].value = int(n_steps)
         prog["u_phi_max"].value = float(phi_max)
+        # lam_max: suficiente para ir de la camara al BH y volver,
+        # pero sin hacer dlam demasiado grande (max ~0.15 por paso)
+        kerr_lam = float(cam_r + lam_max)
+        max_dlam = 0.15
+        kerr_lam = min(kerr_lam, max_dlam * n_steps)
+        prog["u_lam_max"].value = kerr_lam
         prog["u_gamma"].value = float(gamma)
         prog["u_time"].value = float(time.perf_counter() - t_total_start)
 
@@ -387,11 +421,13 @@ def main() -> None:
             theta_deg = np.degrees(cam_theta)
             phi_deg = np.degrees(cam_phi) % 360
             rec_tag = " | [REC]" if recording["active"] else ""
+            metric = "Kerr" if spin > 1e-6 else "Schwarzschild"
+            spin_tag = f" a={spin:.3f}" if spin > 1e-6 else ""
             glfw.set_window_title(
                 window,
-                f"Agujero Negro — {fps_display:.1f} FPS | "
-                f"r={cam_r:.1f} theta={theta_deg:.1f} phi={phi_deg:.1f} | "
-                f"RK4 steps={n_steps}{rec_tag}"
+                f"{metric}{spin_tag} — {fps_display:.1f} FPS | "
+                f"r={cam_r:.1f} θ={theta_deg:.1f}° φ={phi_deg:.1f}° | "
+                f"ISCO={r_inner:.2f} steps={n_steps}{rec_tag}"
             )
 
     # Guardar grabacion pendiente si se cerro la ventana mientras grababa

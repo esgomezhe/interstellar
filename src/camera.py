@@ -27,7 +27,8 @@ class RayInfo:
 
 @dataclass
 class Camera:
-    """Camara perspectiva mirando al centro del agujero negro.
+    """
+    Camara perspectiva mirando al centro del agujero negro.
 
     Args:
         r: Distancia radial desde el centro (en unidades de M).
@@ -52,7 +53,8 @@ class Camera:
 
     @property
     def _basis(self) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-        """Base ortonormal local en la camara.
+        """
+        Base ortonormal local en la camara.
 
         Retorna (e_r, e_theta, e_phi) en coordenadas cartesianas.
         """
@@ -64,7 +66,8 @@ class Camera:
         return e_r, e_theta, e_phi
 
     def pixel_to_ray(self, i: int, j: int) -> RayInfo:
-        """Convierte coordenadas de pixel a informacion del rayo.
+        """
+        Convierte coordenadas de pixel a informacion del rayo.
 
         Args:
             i: Indice de columna (0 = izquierda).
@@ -130,3 +133,75 @@ class Camera:
                 cross = np.cross(e_r, d)
                 b_array[j, i] = self.r * np.linalg.norm(cross)
         return b_array
+
+    # -----------------------------------------------------------------
+    # Kerr: mapeo de pixel a constantes de Carter (xi, eta)
+    # -----------------------------------------------------------------
+
+    def pixel_to_carter(self, i: int, j: int, a: float = 0.0) -> tuple[float, float, float, float]:
+        """
+        Convierte coordenadas de pixel a constantes de Carter para Kerr.
+
+        Las coordenadas celestes de Bardeen (alpha_B, beta_B) estan en unidades
+        de M (longitud), no radianes. Para un observador a distancia r_obs:
+            alpha_B = r_obs * tan(alpha_pixel)
+            beta_B = r_obs * tan(beta_pixel)
+
+        Luego (Bardeen 1973):
+            xi = -alpha_B * sin(theta_obs)
+            eta = beta_B^2 + a^2*cos^2(theta_obs) - xi^2*cot^2(theta_obs)
+
+        Args:
+            i: indice de columna
+            j: indice de fila
+            a: parametro de spin
+
+        Returns:
+            (xi, eta, alpha_B, beta_B): constantes de Carter y coordenadas Bardeen.
+        """
+        fov_rad = np.radians(self.fov)
+        pixel_size = fov_rad / self.height
+
+        alpha_pix = (i - self.width / 2.0 + 0.5) * pixel_size
+        beta_pix = (self.height / 2.0 - j - 0.5) * pixel_size
+
+        # Coordenadas Bardeen en unidades de M
+        alpha_B = self.r * np.tan(alpha_pix)
+        beta_B = self.r * np.tan(beta_pix)
+
+        sin_t = np.sin(self.theta)
+        cos_t = np.cos(self.theta)
+
+        xi = -alpha_B * sin_t
+        cot_t = cos_t / sin_t if abs(sin_t) > 1e-12 else 0.0
+        eta = beta_B * beta_B - a * a * cos_t * cos_t + xi * xi * cot_t * cot_t
+
+        return xi, eta, alpha_B, beta_B
+
+    def all_carter_params(self, a: float = 0.0
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Retorna arreglos 2D de (xi, eta, beta_B) para cada pixel, forma (height, width)."""
+        xi_arr = np.zeros((self.height, self.width))
+        eta_arr = np.zeros((self.height, self.width))
+        beta_B_arr = np.zeros((self.height, self.width))
+        fov_rad = np.radians(self.fov)
+        pixel_size = fov_rad / self.height
+        sin_t = np.sin(self.theta)
+        cos_t = np.cos(self.theta)
+        cot_t = cos_t / sin_t if abs(sin_t) > 1e-12 else 0.0
+        a2cos2 = a * a * cos_t * cos_t
+        cot2 = cot_t * cot_t
+
+        for j in range(self.height):
+            beta_pix = (self.height / 2.0 - j - 0.5) * pixel_size
+            beta_B = self.r * np.tan(beta_pix)
+            beta_B2 = beta_B * beta_B
+            for i in range(self.width):
+                alpha_pix = (i - self.width / 2.0 + 0.5) * pixel_size
+                alpha_B = self.r * np.tan(alpha_pix)
+                xi = -alpha_B * sin_t
+                xi_arr[j, i] = xi
+                eta_arr[j, i] = beta_B2 - a2cos2 + xi * xi * cot2
+                beta_B_arr[j, i] = beta_B
+
+        return xi_arr, eta_arr, beta_B_arr
