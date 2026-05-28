@@ -431,6 +431,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         if (sin_t < THETA_GUARD && sin_t >= 0.0) sin_t = THETA_GUARD;
         if (sin_t > -THETA_GUARD && sin_t < 0.0) sin_t = -THETA_GUARD;
         sigma = r_ * r_ + a * a * cos_t * cos_t;
+        sigma = max(sigma, 1e-6);  // guard: evita Sigma=0 en singularidad del anillo
         delta = r_ * r_ - 2.0 * m * r_ + a * a;
         if (abs(delta) < DELTA_GUARD) delta = DELTA_GUARD;
         P = r_ * r_ + a * a - a * xi;
@@ -453,6 +454,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         if (sin_t < THETA_GUARD && sin_t >= 0.0) sin_t = THETA_GUARD;
         if (sin_t > -THETA_GUARD && sin_t < 0.0) sin_t = -THETA_GUARD;
         sigma = r2 * r2 + a * a * cos_t * cos_t;
+        sigma = max(sigma, 1e-6);
         delta = r2 * r2 - 2.0 * m * r2 + a * a;
         if (abs(delta) < DELTA_GUARD) delta = DELTA_GUARD;
         P = r2 * r2 + a * a - a * xi;
@@ -475,6 +477,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         if (sin_t < THETA_GUARD && sin_t >= 0.0) sin_t = THETA_GUARD;
         if (sin_t > -THETA_GUARD && sin_t < 0.0) sin_t = -THETA_GUARD;
         sigma = r3 * r3 + a * a * cos_t * cos_t;
+        sigma = max(sigma, 1e-6);
         delta = r3 * r3 - 2.0 * m * r3 + a * a;
         if (abs(delta) < DELTA_GUARD) delta = DELTA_GUARD;
         P = r3 * r3 + a * a - a * xi;
@@ -497,6 +500,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         if (sin_t < THETA_GUARD && sin_t >= 0.0) sin_t = THETA_GUARD;
         if (sin_t > -THETA_GUARD && sin_t < 0.0) sin_t = -THETA_GUARD;
         sigma = r4 * r4 + a * a * cos_t * cos_t;
+        sigma = max(sigma, 1e-6);
         delta = r4 * r4 - 2.0 * m * r4 + a * a;
         if (abs(delta) < DELTA_GUARD) delta = DELTA_GUARD;
         P = r4 * r4 + a * a - a * xi;
