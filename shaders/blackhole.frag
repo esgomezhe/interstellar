@@ -42,7 +42,7 @@ const float PI = 3.14159265359;
 const float TURB_AMPLITUDE = 0.2;
 
 // Guardas numericas para Kerr (float32)
-const float THETA_GUARD = 0.005;      // ~0.3 deg del polo, evita sin(t)->0
+const float THETA_GUARD = 0.01;       // ~0.57 deg del polo, smoother pole handling
 const float DELTA_GUARD = 1e-6;       // evita division por delta->0 en horizonte
 
 
@@ -337,28 +337,38 @@ vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
 // KERR: integrador de Carter (6 variables)
 // =========================================================================
 
-// Kerr gravitational redshift
-float kerr_redshift(float r, float theta, float a, float m) {
-    float sigma = r * r + a * a * cos(theta) * cos(theta);
-    float val = 1.0 - 2.0 * m * r / sigma;
-    if (val <= 0.0) return 0.0;
-    return sqrt(val);
-}
-
-// Kerr Doppler factor (Keplerian prograde orbit)
-float kerr_doppler(float r_hit, float phi_hit, float a, float m) {
+// Kerr combined redshift + Doppler (g-factor)
+// For a photon emitted by matter in Keplerian circular orbit in the equatorial
+// plane of a Kerr BH, the frequency ratio g = nu_obs / nu_emit is:
+//
+//   g = 1 / [ gamma * (1 - omega * xi_local) ]
+//
+// where:
+//   omega = M^{1/2} / (r^{3/2} + a M^{1/2})   Keplerian angular velocity
+//   gamma = 1 / sqrt(1 - (r^2 + a^2) omega^2 + 2 a omega / r)   (Kerr Lorentz)
+//   xi_local is the photon's conserved angular momentum per unit energy
+//
+// This properly combines gravitational redshift AND Doppler into one factor.
+// Reference: Cunningham (1975), Luminet (1979)
+//
+float kerr_g_factor(float r_hit, float xi, float a, float m) {
     float sqrt_m = sqrt(m);
-    float omega = sqrt_m / (pow(r_hit, 1.5) + a * sqrt_m);
-    float v_phi = r_hit * omega;
-    float v_dot_n = v_phi * sin(phi_hit);
-    if (v_phi >= 1.0) v_phi = 0.999;
-    float gamma_lorentz = 1.0 / sqrt(1.0 - v_phi * v_phi);
-    return 1.0 / (gamma_lorentz * (1.0 - v_dot_n));
+    float r32 = pow(r_hit, 1.5);
+    float omega = sqrt_m / (r32 + a * sqrt_m);
+
+    // Effective velocity squared in Kerr (from normalization of 4-velocity)
+    float r2 = r_hit * r_hit;
+    float v2 = (r2 + a * a) * omega * omega - 2.0 * a * omega * m / r_hit;
+    v2 = clamp(v2, 0.0, 0.99);
+
+    float gamma = 1.0 / sqrt(1.0 - v2);
+    float g = 1.0 / (gamma * (1.0 - omega * xi));
+    return clamp(g, 0.05, 5.0);
 }
 
 
 vec3 trace_kerr(float xi, float eta, float beta_B,
-    float r_cam, float theta_cam, float a, float m,
+    float r_cam, float theta_cam, float phi_cam, float a, float m,
     float lam_max, int n_steps,
     float r_inner, float r_outer, float base_temp, float beaming_power, float time)
 {
@@ -377,7 +387,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
 
     float cot_t0 = cos_t0 / sin_t0;
     float Theta0 = eta + a * a * cos_t0 * cos_t0 - xi * xi * cot_t0 * cot_t0;
-    if (Theta0 < 0.0) Theta0 = 0.0;
+    if (Theta0 < 0.0) Theta0 = 1e-4;
     // p_theta = -beta_B para backward ray tracing
     float sqrt_Theta0 = sqrt(Theta0);
     float pt_ = (beta_B > 0.0) ? -sqrt_Theta0 : sqrt_Theta0;
@@ -387,9 +397,11 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     if (disc_h < 0.0) disc_h = 0.0;
     float r_plus = m + sqrt(disc_h);
 
-    // Paso de integracion: limitar dlam para mantener precision
-    float dlam = lam_max / float(n_steps);
+    // Paso de integracion base (se escala adaptativamente en el loop)
+    float dlam_base = lam_max / float(n_steps);
 
+    // El integrador trabaja con phi relativo al rayo (empieza en 0)
+    // phi_cam se suma al final para obtener coordenadas globales
     float r_ = r_cam;
     float th_ = theta_cam;
     float ph_ = 0.0;
@@ -408,6 +420,10 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     float eta_xi_a2 = eta + xi_a * xi_a;
 
     for (int k = 0; k < n_steps; k++) {
+        // Adaptive step: smaller near BH, larger far away
+        float step_scale = clamp(sqrt(max(r_, 1.0) / r_cam), 0.01, 2.0);
+        float dlam = dlam_base * step_scale;
+
         // === k1 ===
         float cos_t, sin_t, sigma, delta, P, inv_sig;
 
@@ -508,8 +524,8 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         // Captura
         if (r_new <= r_plus * 1.01) { ray_fate = 2; break; }
 
-        // Escape
-        if (r_new > 2.0 * r_cam) { ray_fate = 1; break; }
+        // Escape: ray past camera and moving outward
+        if (r_new > r_cam && pr_new > 0.0) { ray_fate = 1; break; }
 
         // Deteccion de cruce ecuatorial (theta cruza pi/2)
         float d_prev = th_prev - half_pi;
@@ -545,39 +561,35 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     // === Colorear ===
     if (n_cross == 0) {
         if (ray_fate == 1) {
-            // Rayo escapado: direccion final en cartesianas
+            // Rayo escapado: direccion final en coordenadas globales
+            float ph_global = ph_ + phi_cam;
             float sf = max(sin(th_), THETA_GUARD);
-            vec3 d_final = vec3(sf * cos(ph_), sf * sin(ph_), cos(th_));
+            vec3 d_final = vec3(sf * cos(ph_global), sf * sin(ph_global), cos(th_));
             return starfield(normalize(d_final));
         }
         return vec3(0.0);
     }
 
+    // Primer cruce: colorear con Kerr g-factor
     float r_hit = r_cross[0];
-    float phi_hit = phi_cross[0];
+    float phi_ray = phi_cross[0];           // phi en coordenadas del rayo
+    float phi_global = phi_ray + phi_cam;   // phi en coordenadas globales
     float base_emission = novikov_thorne_emission(r_hit, r_inner);
 
-    float g = kerr_redshift(r_hit, half_pi, a, m);
-    float D = kerr_doppler(r_hit, phi_hit, a, m);
-    float g_d = g * D;
+    // g-factor combina redshift gravitacional + Doppler de Kerr
+    float g_d = kerr_g_factor(r_hit, xi, a, m);
 
-    // Posicion del hit en coordenadas cartesianas para azimuth y turbulencia
-    float hit_x = r_hit * cos(phi_hit);
-    float hit_y = r_hit * sin(phi_hit);
-    float azimuth = atan(hit_y, hit_x);
+    // Azimuth global para turbulencia y rotacion del disco
+    float azimuth = phi_global;
     float turb = disk_turbulence(r_hit, azimuth, m, a, time);
     float intensity = base_emission * limb_fac[0] * turb * pow(max(g_d, 0.01), beaming_power);
 
     for (int c = 1; c < n_cross; c++) {
-        float g_e = kerr_redshift(r_cross[c], half_pi, a, m);
-        float D_e = kerr_doppler(r_cross[c], phi_cross[c], a, m);
-        float gd_e = g_e * D_e;
+        float g_e = kerr_g_factor(r_cross[c], xi, a, m);
         float em_e = novikov_thorne_emission(r_cross[c], r_inner);
-        float hx_e = r_cross[c] * cos(phi_cross[c]);
-        float hy_e = r_cross[c] * sin(phi_cross[c]);
-        float az_e = atan(hy_e, hx_e);
+        float az_e = phi_cross[c] + phi_cam;
         float turb_e = disk_turbulence(r_cross[c], az_e, m, a, time);
-        intensity += em_e * limb_fac[c] * turb_e * pow(max(gd_e, 0.01), beaming_power) * 0.5;
+        intensity += em_e * limb_fac[c] * turb_e * pow(max(g_e, 0.01), beaming_power) * 0.5;
     }
 
     intensity = clamp(intensity, 0.0, 1.0);
@@ -651,7 +663,7 @@ void main() {
         float eta = beta_B * beta_B - u_spin * u_spin * cos_t * cos_t + xi * xi * cot_t * cot_t;
 
         color = trace_kerr(xi, eta, beta_B,
-            u_r_cam, u_theta_cam, u_spin, u_m,
+            u_r_cam, u_theta_cam, u_phi_cam, u_spin, u_m,
             u_lam_max, u_n_steps,
             u_r_inner, u_r_outer, u_base_temp, u_beaming_power, u_time);
     }

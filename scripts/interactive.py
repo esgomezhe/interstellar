@@ -124,7 +124,7 @@ def run_interactive(
     # --- Parametros de render ---
     n_steps = 3000      # pasos RK4 (GPU permite alta calidad)
     phi_max = 50.0
-    lam_max = 300.0     # parametro afin maximo para Kerr
+    lam_max = 500.0     # parametro afin maximo para Kerr (adaptive stepping budget)
     gamma = 0.45
     target_fps = 120
     frame_time_min = 1.0 / target_fps
@@ -348,10 +348,10 @@ def run_interactive(
 
         prog["u_n_steps"].value = int(n_steps)
         prog["u_phi_max"].value = float(phi_max)
-        # lam_max: suficiente para ir de la camara al BH y volver,
-        # pero sin hacer dlam demasiado grande (max ~0.15 por paso)
+        # lam_max: budget for adaptive stepping
+        # With sqrt(r/r_cam) scaling, effective step near BH is ~10x smaller
         kerr_lam = float(cam_r + lam_max)
-        max_dlam = 0.15
+        max_dlam = 0.25
         kerr_lam = min(kerr_lam, max_dlam * n_steps)
         prog["u_lam_max"].value = kerr_lam
         prog["u_gamma"].value = float(gamma)
