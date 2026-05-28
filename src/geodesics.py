@@ -266,7 +266,10 @@ def kerr_geodesic_rhs(
     r, theta, phi, t_coord = y
 
     sigma = r * r + a * a * np.cos(theta) ** 2
+    sigma = max(sigma, 1e-6)
     delta = r * r - 2.0 * m * r + a * a
+    if abs(delta) < 1e-6:
+        delta = 1e-6
     P = r * r + a * a - a * xi
 
     # Potencial radial
@@ -275,8 +278,8 @@ def kerr_geodesic_rhs(
     # Potencial polar
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
-    if abs(sin_t) < 1e-12:
-        sin_t = 1e-12 if sin_t >= 0 else -1e-12
+    if abs(sin_t) < 0.01:
+        sin_t = 0.01 if sin_t >= 0 else -0.01
     Theta_val = eta + a * a * cos_t * cos_t - xi * xi * (cos_t / sin_t) ** 2
 
     inv_sigma = 1.0 / sigma
@@ -338,11 +341,14 @@ def kerr_geodesic_rhs_2nd_order(
 
     cos_t = np.cos(theta)
     sin_t = np.sin(theta)
-    if abs(sin_t) < 1e-12:
-        sin_t = 1e-12 if sin_t >= 0 else -1e-12
+    if abs(sin_t) < 0.01:
+        sin_t = 0.01 if sin_t >= 0 else -0.01
 
     sigma = r * r + a * a * cos_t * cos_t
+    sigma = max(sigma, 1e-6)  # guard: singularidad del anillo
     delta = r * r - 2.0 * m * r + a * a
+    if abs(delta) < 1e-6:
+        delta = 1e-6  # guard: horizonte
     P = r * r + a * a - a * xi
     inv_sigma = 1.0 / sigma
 

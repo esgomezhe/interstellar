@@ -665,11 +665,15 @@ def _kerr_rk4_step(r, theta, p_r, p_theta, phi, t_coord,
     def derivs(r_, theta_, p_r_, p_theta_, phi_, t_):
         cos_t = np.cos(theta_)
         sin_t = np.sin(theta_)
-        if abs(sin_t) < 1e-12:
-            sin_t = 1e-12 if sin_t >= 0 else -1e-12
+        if abs(sin_t) < 0.01:
+            sin_t = 0.01 if sin_t >= 0 else -0.01
 
         sigma = r_ * r_ + a * a * cos_t * cos_t
+        if sigma < 1e-6:
+            sigma = 1e-6
         delta = r_ * r_ - 2.0 * m * r_ + a * a
+        if abs(delta) < 1e-6:
+            delta = 1e-6
         P = r_ * r_ + a * a - a * xi
         inv_sigma = 1.0 / sigma
 
@@ -801,12 +805,12 @@ def trace_kerr_geodesic_rk4(xi, eta, r_cam, theta_cam, a, m, lam_max, n_steps,
             a, xi, eta, m, dlam,
         )
 
-        # Proteccion: theta en [epsilon, pi-epsilon]
-        if theta_new < 1e-6:
-            theta_new = 1e-6
+        # Proteccion: theta en [THETA_GUARD, pi-THETA_GUARD]
+        if theta_new < 0.01:
+            theta_new = 0.01
             pt_new = abs(pt_new)
-        elif theta_new > np.pi - 1e-6:
-            theta_new = np.pi - 1e-6
+        elif theta_new > np.pi - 0.01:
+            theta_new = np.pi - 0.01
             pt_new = -abs(pt_new)
 
         r_arr[k + 1] = r_new
@@ -819,8 +823,8 @@ def trace_kerr_geodesic_rk4(xi, eta, r_cam, theta_cam, a, m, lam_max, n_steps,
             n_valid = k + 2
             break
 
-        # Escape: r > 2 * r_cam
-        if r_new > 2.0 * r_cam:
+        # Escape: r > r_cam y alejandose (p_r > 0)
+        if r_new > r_cam and pr_new > 0.0:
             fate = 1
             n_valid = k + 2
             break
@@ -873,53 +877,42 @@ def kerr_find_crossings(r_arr, theta_arr, phi_arr, n_pts, r_inner, r_outer):
 
 
 @njit(cache=True)
-def kerr_doppler_factor(r_hit, phi_hit, theta_obs, a, m):
+def kerr_g_factor(r_hit, xi, a, m):
     """
-    Factor Doppler para gas en orbita Kepleriana en Kerr.
+    Factor g unificado de Cunningham (1975): redshift + Doppler combinados.
 
-    Usa Omega_Kerr = sqrt(M) / (r^(3/2) + a*sqrt(M)) para orbita prograda.
-    El resultado se clampea a [0.1, 5.0] para evitar divergencias numericas
-    cerca del horizonte donde v_phi -> c.
+    g = 1 / [gamma * (1 - omega * xi)]
+
+    Donde:
+      omega = sqrt(M) / (r^(3/2) + a*sqrt(M))  (Keplerian progrado)
+      v^2 = (r^2 + a^2)*omega^2 - 2*a*omega*M/r
+      gamma = 1 / sqrt(1 - v^2)
+
+    Usa xi (constante conservada) en vez de angulos locales, evitando
+    el error de usar phi_ray (que empieza en 0 para cada rayo).
+
+    Reference: Cunningham (1975), Luminet (1979).
     """
     sqrt_m = np.sqrt(m)
     r32 = r_hit ** 1.5
-    omega = sqrt_m / (r32 + a * sqrt_m)  # progrado
+    omega = sqrt_m / (r32 + a * sqrt_m)
 
-    # Velocidad lineal del gas en el plano ecuatorial: v_phi = r * omega
-    v_phi = r_hit * omega
+    r2 = r_hit * r_hit
+    v2 = (r2 + a * a) * omega * omega - 2.0 * a * omega * m / r_hit
+    if v2 < 0.0:
+        v2 = 0.0
+    elif v2 > 0.99:
+        v2 = 0.99
 
-    # Clampear velocidad ANTES de usar en cualquier calculo
-    if v_phi >= 0.999:
-        v_phi = 0.999
+    gamma = 1.0 / np.sqrt(1.0 - v2)
+    g = 1.0 / (gamma * (1.0 - omega * xi))
 
-    gamma = 1.0 / np.sqrt(1.0 - v_phi * v_phi)
+    if g < 0.05:
+        g = 0.05
+    elif g > 5.0:
+        g = 5.0
 
-    # Proyeccion sobre linea de vision (observador lejano)
-    v_dot_n = v_phi * np.sin(phi_hit)
-
-    D = 1.0 / (gamma * (1.0 - v_dot_n))
-
-    # Clamp fisicamente razonable: D < 0.1 o D > 5 es numerico, no fisico
-    if D < 0.1:
-        D = 0.1
-    elif D > 5.0:
-        D = 5.0
-
-    return D
-
-
-@njit(cache=True)
-def kerr_gravitational_redshift(r, theta, a, m):
-    """
-    Redshift gravitacional generalizado en Kerr.
-
-    g = sqrt(1 - 2Mr / Sigma) con Sigma = r^2 + a^2*cos^2(theta)
-    """
-    sigma = r * r + a * a * np.cos(theta) ** 2
-    val = 1.0 - 2.0 * m * r / sigma
-    if val <= 0.0:
-        return 0.0
-    return np.sqrt(val)
+    return g
 
 
 @njit(cache=True)
@@ -976,7 +969,7 @@ def _kerr_disk_turbulence(r_hit, phi_hit, m, a, t):
 @njit(cache=True)
 def _kerr_color_from_geodesic(
     r_arr, theta_arr, phi_arr, n_pts,
-    r_cam, theta_cam, a, m,
+    r_cam, theta_cam, xi, a, m,
     r_inner, r_outer, base_temp, beaming_power, t, fate,
 ):
     """Calcula el color RGB para un pixel en Kerr."""
@@ -1002,31 +995,19 @@ def _kerr_color_from_geodesic(
     base_emission = novikov_thorne_emission(r_hit, r_inner)
     limb = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[0], n_pts)
 
-    g = kerr_gravitational_redshift(r_hit, np.pi / 2.0, a, m)
-    D = kerr_doppler_factor(r_hit, phi_hit, theta_cam, a, m)
-    g_d = g * D
-    # Clamp g_d para que g_d^beaming_power no explote
-    if g_d < 0.05:
-        g_d = 0.05
-    elif g_d > 3.0:
-        g_d = 3.0
+    # g-factor de Cunningham: redshift + Doppler unificado
+    g_d = kerr_g_factor(r_hit, xi, a, m)
 
     turb = _kerr_disk_turbulence(r_hit, phi_hit, m, a, t)
-    intensity = base_emission * limb * turb * g_d ** beaming_power
+    intensity = base_emission * limb * turb * max(g_d, 0.01) ** beaming_power
 
     # Cruces adicionales
     for c in range(1, n_cross):
-        g_extra = kerr_gravitational_redshift(r_cross[c], np.pi / 2.0, a, m)
-        D_extra = kerr_doppler_factor(r_cross[c], phi_cross[c], theta_cam, a, m)
-        g_d_extra = g_extra * D_extra
-        if g_d_extra < 0.05:
-            g_d_extra = 0.05
-        elif g_d_extra > 3.0:
-            g_d_extra = 3.0
+        g_d_extra = kerr_g_factor(r_cross[c], xi, a, m)
         extra_emission = novikov_thorne_emission(r_cross[c], r_inner)
         limb_extra = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[c], n_pts)
         turb_extra = _kerr_disk_turbulence(r_cross[c], phi_cross[c], m, a, t)
-        intensity += extra_emission * limb_extra * turb_extra * g_d_extra ** beaming_power * 0.5
+        intensity += extra_emission * limb_extra * turb_extra * max(g_d_extra, 0.01) ** beaming_power * 0.5
 
     # Usar tone mapping en lugar de clamp duro para preservar rango dinamico
     # Reinhard: I_mapped = I / (1 + I)
@@ -1101,7 +1082,7 @@ def kerr_render_frame_parallel(
         # Colorear
         cr, cg, cb = _kerr_color_from_geodesic(
             r_arr, theta_arr, phi_arr, n_valid,
-            r_cam, theta_cam, a, m,
+            r_cam, theta_cam, xi, a, m,
             r_inner, r_outer, base_temp, beaming_power, t, fate,
         )
         image[j, i, 0] = cr
