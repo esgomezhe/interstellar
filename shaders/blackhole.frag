@@ -420,7 +420,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     float eta_xi_a2 = eta + xi_a * xi_a;
 
     for (int k = 0; k < n_steps; k++) {
-        // Adaptive step: smaller near BH, larger far away
+        // Adaptive step: sqrt scaling for good coverage at all distances
         float step_scale = clamp(sqrt(max(r_, 1.0) / r_cam), 0.01, 2.0);
         float dlam = dlam_base * step_scale;
 

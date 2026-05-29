@@ -53,10 +53,24 @@ void main() {
         }
         frag_color = vec4(result, 1.0);
     }
-    else {
+    else if (u_mode == 3) {
         // Compose: original + bloom
         vec3 original = texture(u_texture, v_uv).rgb;
         vec3 bloom = texture(u_bloom_texture, v_uv).rgb;
         frag_color = vec4(original + bloom * u_intensity, 1.0);
+    }
+    else {
+        // Mode 4: gentle 3x3 Gaussian smooth
+        vec3 result = vec3(0.0);
+        result += texture(u_texture, v_uv + vec2(-1.0, -1.0) * u_texel_size).rgb * 0.0625;
+        result += texture(u_texture, v_uv + vec2( 0.0, -1.0) * u_texel_size).rgb * 0.125;
+        result += texture(u_texture, v_uv + vec2( 1.0, -1.0) * u_texel_size).rgb * 0.0625;
+        result += texture(u_texture, v_uv + vec2(-1.0,  0.0) * u_texel_size).rgb * 0.125;
+        result += texture(u_texture, v_uv).rgb * 0.25;
+        result += texture(u_texture, v_uv + vec2( 1.0,  0.0) * u_texel_size).rgb * 0.125;
+        result += texture(u_texture, v_uv + vec2(-1.0,  1.0) * u_texel_size).rgb * 0.0625;
+        result += texture(u_texture, v_uv + vec2( 0.0,  1.0) * u_texel_size).rgb * 0.125;
+        result += texture(u_texture, v_uv + vec2( 1.0,  1.0) * u_texel_size).rgb * 0.0625;
+        frag_color = vec4(result, 1.0);
     }
 }

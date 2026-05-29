@@ -349,7 +349,6 @@ def run_interactive(
         prog["u_n_steps"].value = int(n_steps)
         prog["u_phi_max"].value = float(phi_max)
         # lam_max: budget for adaptive stepping
-        # With sqrt(r/r_cam) scaling, effective step near BH is ~10x smaller
         kerr_lam = float(cam_r + lam_max)
         max_dlam = 0.25
         kerr_lam = min(kerr_lam, max_dlam * n_steps)
@@ -362,9 +361,19 @@ def run_interactive(
 
         texel_size = (1.0 / fb_w, 1.0 / fb_h)
 
-        # --- Pass 2: Extraer pixeles brillantes ---
-        fbo_cache["bright_fbo"].use()
+        # --- Pass 2: Gentle 3x3 Gaussian smooth (scene → ping) ---
+        fbo_cache["ping_fbo"].use()
         fbo_cache["scene_tex"].use(location=0)
+        bloom_prog["u_texture"].value = 0
+        bloom_prog["u_mode"].value = 4
+        bloom_prog["u_texel_size"].value = texel_size
+        ctx.clear(0.0, 0.0, 0.0)
+        bloom_vao.render(moderngl.TRIANGLE_STRIP)
+        # ping_tex = smoothed scene
+
+        # --- Pass 3: Extraer pixeles brillantes (from smoothed) ---
+        fbo_cache["bright_fbo"].use()
+        fbo_cache["ping_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 0
         bloom_prog["u_threshold"].value = float(bloom_threshold)
@@ -372,26 +381,27 @@ def run_interactive(
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
-        # --- Pass 3: Blur horizontal ---
-        fbo_cache["ping_fbo"].use()
+        # --- Pass 4: Blur horizontal ---
+        fbo_cache["scene_fbo"].use()
         fbo_cache["bright_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 1
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
-        # --- Pass 4: Blur vertical ---
+        # --- Pass 5: Blur vertical ---
         fbo_cache["bright_fbo"].use()
-        fbo_cache["ping_tex"].use(location=0)
+        fbo_cache["scene_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 2
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
-        # --- Pass 5: Composicion final a pantalla ---
+        # --- Pass 6: Composicion final a pantalla ---
+        # ping_tex = smoothed scene, bright_tex = blurred bloom
         ctx.screen.use()
         ctx.viewport = (0, 0, fb_w, fb_h)
-        fbo_cache["scene_tex"].use(location=0)
+        fbo_cache["ping_tex"].use(location=0)
         fbo_cache["bright_tex"].use(location=1)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_bloom_texture"].value = 1
