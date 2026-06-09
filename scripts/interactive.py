@@ -28,7 +28,7 @@ from PIL import Image
 # Directorio raiz del proyecto
 ROOT = Path(__file__).resolve().parent.parent
 
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 
 def load_shader(name: str) -> str:
@@ -38,6 +38,18 @@ def load_shader(name: str) -> str:
 
 SCREENSHOTS_DIR = ROOT / "outputs" / "screenshots"
 RECORDINGS_DIR = ROOT / "outputs" / "recordings"
+
+
+def halton(index: int, base: int) -> float:
+    """Secuencia de Halton: muestreo subpixel bien distribuido para TAA."""
+    result = 0.0
+    f = 1.0
+    i = index
+    while i > 0:
+        f /= base
+        result += f * (i % base)
+        i //= base
+    return result
 
 
 def read_framebuffer(ctx, fb_w: int, fb_h: int) -> Image.Image:
@@ -96,7 +108,7 @@ def run_interactive(
         initial_spin: spin inicial (0.0 para Schwarzschild, 0.998 para Kerr)
         allow_spin_change: si True, teclas 0-9 cambian el spin
     """
-    from constants import kerr_isco
+    from src.constants import kerr_isco
 
     # --- Parametros iniciales de la camara ---
     cam_r = 30.0
@@ -126,6 +138,7 @@ def run_interactive(
     phi_max = 50.0
     lam_max = 500.0     # parametro afin maximo para Kerr (adaptive stepping budget)
     gamma = 0.45
+    time_scale = 6.0    # acelera la rotacion del disco para hacerla visible
     target_fps = 120
     frame_time_min = 1.0 / target_fps
 
@@ -194,7 +207,7 @@ def run_interactive(
     fbo_cache = {"w": 0, "h": 0}
 
     def create_bloom_fbos(w, h):
-        """Crea FBOs para el pipeline de bloom al tamano actual."""
+        """Crea FBOs para el pipeline de bloom y acumulacion TAA."""
         fbo_cache["scene_tex"] = ctx.texture((w, h), 4, dtype="f2")
         fbo_cache["scene_fbo"] = ctx.framebuffer(
             color_attachments=[fbo_cache["scene_tex"]]
@@ -207,6 +220,12 @@ def run_interactive(
         fbo_cache["ping_fbo"] = ctx.framebuffer(
             color_attachments=[fbo_cache["ping_tex"]]
         )
+        # Ping-pong de acumulacion temporal (TAA)
+        for name in ("accum_a", "accum_b"):
+            fbo_cache[f"{name}_tex"] = ctx.texture((w, h), 4, dtype="f2")
+            fbo_cache[f"{name}_fbo"] = ctx.framebuffer(
+                color_attachments=[fbo_cache[f"{name}_tex"]]
+            )
         fbo_cache["w"] = w
         fbo_cache["h"] = h
 
@@ -297,6 +316,11 @@ def run_interactive(
     t_total_start = time.perf_counter()
     fps_display = 0.0
 
+    # Estado de acumulacion temporal (TAA)
+    accum_frames = 0
+    frame_index = 0
+    last_params = None
+
     spin_controls = ""
     if allow_spin_change:
         spin_controls = "\n  0-9: spin (0=Schwarzschild, 9=Gargantua a=0.998)"
@@ -327,6 +351,28 @@ def run_interactive(
         # Recrear FBOs si cambio el tamano
         if fb_w != fbo_cache["w"] or fb_h != fbo_cache["h"]:
             create_bloom_fbos(fb_w, fb_h)
+            accum_frames = 0
+
+        # Reset de acumulacion si la camara o la fisica cambiaron
+        params_now = (
+            round(cam_r, 6), round(cam_theta, 6), round(cam_phi, 6),
+            spin, n_steps, fov,
+        )
+        if params_now != last_params:
+            accum_frames = 0
+            last_params = params_now
+        accum_frames += 1
+        frame_index += 1
+
+        # Jitter subpixel (Halton 2,3) — sin jitter en el primer frame tras
+        # mover la camara para evitar shimmer durante la interaccion
+        if accum_frames == 1:
+            jitter = (0.0, 0.0)
+        else:
+            h_idx = frame_index % 64 + 1
+            jitter = (halton(h_idx, 2) - 0.5, halton(h_idx, 3) - 0.5)
+        # Peso del frame nuevo: 1/N decreciente con piso (el disco rota)
+        taa_blend = max(1.0 / accum_frames, 0.06)
 
         # --- Pass 1: Render escena a FBO ---
         fbo_cache["scene_fbo"].use()
@@ -354,35 +400,40 @@ def run_interactive(
         kerr_lam = min(kerr_lam, max_dlam * n_steps)
         prog["u_lam_max"].value = kerr_lam
         prog["u_gamma"].value = float(gamma)
-        prog["u_time"].value = float(time.perf_counter() - t_total_start)
+        prog["u_time"].value = float((time.perf_counter() - t_total_start) * time_scale)
+        prog["u_jitter"].value = jitter
 
         ctx.clear(0.0, 0.0, 0.0)
         vao.render(moderngl.TRIANGLE_STRIP)
 
         texel_size = (1.0 / fb_w, 1.0 / fb_h)
 
-        # --- Pass 2: Gentle 3x3 Gaussian smooth (scene → ping) ---
-        fbo_cache["ping_fbo"].use()
+        # --- Pass 2: Acumulacion temporal TAA (scene + accum_a → accum_b) ---
+        # Promedia frames jittereados: supersampling progresivo que elimina
+        # el speckle del anillo de fotones sin perder nitidez
+        fbo_cache["accum_b_fbo"].use()
         fbo_cache["scene_tex"].use(location=0)
+        fbo_cache["accum_a_tex"].use(location=1)
         bloom_prog["u_texture"].value = 0
-        bloom_prog["u_mode"].value = 4
+        bloom_prog["u_bloom_texture"].value = 1
+        bloom_prog["u_mode"].value = 5
+        bloom_prog["u_blend"].value = float(taa_blend)
         bloom_prog["u_texel_size"].value = texel_size
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
-        # ping_tex = smoothed scene
+        # accum_b_tex = imagen acumulada (limpia)
 
-        # --- Pass 3: Extraer pixeles brillantes (from smoothed) ---
+        # --- Pass 3: Extraer pixeles brillantes (desde acumulado) ---
         fbo_cache["bright_fbo"].use()
-        fbo_cache["ping_tex"].use(location=0)
+        fbo_cache["accum_b_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 0
         bloom_prog["u_threshold"].value = float(bloom_threshold)
-        bloom_prog["u_texel_size"].value = texel_size
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
         # --- Pass 4: Blur horizontal ---
-        fbo_cache["scene_fbo"].use()
+        fbo_cache["ping_fbo"].use()
         fbo_cache["bright_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 1
@@ -391,17 +442,17 @@ def run_interactive(
 
         # --- Pass 5: Blur vertical ---
         fbo_cache["bright_fbo"].use()
-        fbo_cache["scene_tex"].use(location=0)
+        fbo_cache["ping_tex"].use(location=0)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_mode"].value = 2
         ctx.clear(0.0, 0.0, 0.0)
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
         # --- Pass 6: Composicion final a pantalla ---
-        # ping_tex = smoothed scene, bright_tex = blurred bloom
+        # accum_b_tex = escena acumulada, bright_tex = bloom difuminado
         ctx.screen.use()
         ctx.viewport = (0, 0, fb_w, fb_h)
-        fbo_cache["ping_tex"].use(location=0)
+        fbo_cache["accum_b_tex"].use(location=0)
         fbo_cache["bright_tex"].use(location=1)
         bloom_prog["u_texture"].value = 0
         bloom_prog["u_bloom_texture"].value = 1
@@ -411,6 +462,14 @@ def run_interactive(
         bloom_vao.render(moderngl.TRIANGLE_STRIP)
 
         glfw.swap_buffers(window)
+
+        # Swap ping-pong de acumulacion para el proximo frame
+        fbo_cache["accum_a_tex"], fbo_cache["accum_b_tex"] = (
+            fbo_cache["accum_b_tex"], fbo_cache["accum_a_tex"],
+        )
+        fbo_cache["accum_a_fbo"], fbo_cache["accum_b_fbo"] = (
+            fbo_cache["accum_b_fbo"], fbo_cache["accum_a_fbo"],
+        )
 
         # --- Procesar acciones de captura ---
         for act in pending_actions:

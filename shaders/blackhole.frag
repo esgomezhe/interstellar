@@ -35,11 +35,12 @@ uniform float u_phi_max;        // angulo maximo de integracion (Schwarzschild)
 uniform float u_lam_max;        // parametro afin maximo (Kerr)
 uniform float u_gamma;          // correccion gamma
 uniform float u_time;           // tiempo para animacion del disco
+uniform vec2  u_jitter;         // offset subpixel para supersampling temporal
 
 // --- Constantes ---
 const int MAX_CROSSINGS = 5;
 const float PI = 3.14159265359;
-const float TURB_AMPLITUDE = 0.2;
+const float TURB_AMPLITUDE = 0.35;
 
 // Guardas numericas para Kerr (float32)
 const float THETA_GUARD = 0.01;       // ~0.57 deg del polo, smoother pole handling
@@ -83,8 +84,13 @@ float fbm(vec2 p) {
 float disk_turbulence(float r, float azimuth, float m, float a, float time) {
     float sqrt_m = sqrt(m);
     float omega = sqrt_m / (pow(r, 1.5) + a * sqrt_m);
-    float phi_rot = azimuth - omega * time;
-    vec2 noise_coord = vec2(log(r) * 4.0, phi_rot * 3.0);
+    // Cada anillo rota a su velocidad Kepleriana (rotacion diferencial);
+    // el termino log(r) tuerce el patron en brazos espirales arrastrados
+    float phi_s = azimuth - omega * time + 1.5 * log(r);
+    // Muestrear el ruido sobre un circulo lo hace periodico en azimut
+    // (sin costura en phi = +-pi); log(r) desplaza el circulo radialmente
+    vec2 noise_coord = vec2(cos(phi_s), sin(phi_s)) * 2.5
+                     + vec2(log(r) * 4.0, 0.0);
     float turb = fbm(noise_coord) * 2.0 - 1.0;
     return 1.0 + TURB_AMPLITUDE * turb;
 }
@@ -157,9 +163,13 @@ vec3 starfield(vec3 direction) {
 
     for (int layer = 0; layer < 3; layer++) {
         float scale = 80.0 + float(layer) * 60.0;
-        vec2 cell = vec2(phi_sky, theta_sky) * scale;
-        vec2 cell_id = floor(cell);
-        vec2 cell_frac = fract(cell);
+        // Numero ENTERO de celdas en phi: el grid es periodico y no hay
+        // costura en el corte de rama de atan (phi = +-pi)
+        float n_phi = floor(2.0 * PI * scale);
+        float u = (phi_sky + PI) / (2.0 * PI) * n_phi;
+        float v = theta_sky * scale;
+        vec2 cell_id = vec2(mod(floor(u), n_phi), floor(v));
+        vec2 cell_frac = vec2(fract(u), fract(v));
 
         float h1 = hash21(cell_id * (0.13 + float(layer) * 0.07));
         float h2 = hash21(cell_id * (0.27 + float(layer) * 0.11));
@@ -209,35 +219,33 @@ vec2 schwarzschild_rk4_step(float u, float du, float rs, float dphi) {
 }
 
 
-// Schwarzschild Doppler
-float schwarzschild_doppler(float r_hit, float psi_hit, vec3 e1, vec3 e2, vec3 cam_pos, float m) {
-    float cos_psi = cos(psi_hit);
-    float sin_psi = sin(psi_hit);
-    vec3 hit_pos = r_hit * (cos_psi * e1 + sin_psi * e2);
-    vec3 to_cam = cam_pos - hit_pos;
-    float dist = length(to_cam);
-    if (dist < 1e-12) return 1.0;
-    vec3 n_hat = to_cam / dist;
+// Factor g = nu_obs/nu_em exacto (Cunningham 1975) para emisor en orbita
+// circular Kepleriana prograda ecuatorial:
+//
+//   g = sqrt(1 - 3M/r + 2a*sqrt(M)/r^(3/2))
+//       / [(1 + a*sqrt(M)/r^(3/2)) * (1 - Omega*lam)]
+//
+// El numerador con (1 + a*sqrt(M)/r^(3/2)) es 1/u^t del emisor (Bardeen-
+// Press-Teukolsky 1972): redshift gravitacional + Doppler transversal.
+// (1 - Omega*lam) es el Doppler azimutal, con lam = L_z/E del foton
+// (cantidad conservada: xi en Kerr, -b*n_z en Schwarzschild).
+// Con a = 0 reduce a g = sqrt(1 - 3M/r) / (1 - Omega*lam).
+float disk_g_factor(float r_hit, float lam, float a, float m) {
+    float sqrt_m = sqrt(m);
+    float r32 = pow(r_hit, 1.5);
+    float omega = sqrt_m / (r32 + a * sqrt_m);
 
-    float r_xy = length(hit_pos.xy);
-    if (r_xy < 1e-12) return 1.0;
+    float x = a * sqrt_m / r32;
+    float B = max(1.0 - 3.0 * m / r_hit + 2.0 * x, 1e-6);
 
-    float v_mag = sqrt(m / r_hit);
-    vec2 phi_hat = vec2(-hit_pos.y / r_xy, hit_pos.x / r_xy);
-    float v_dot_n = v_mag * (phi_hat.x * n_hat.x + phi_hat.y * n_hat.y);
-    float gamma_lorentz = 1.0 / sqrt(1.0 - v_mag * v_mag);
-
-    return 1.0 / (gamma_lorentz * (1.0 - v_dot_n));
-}
-
-float gravitational_redshift(float r, float rs) {
-    if (r <= rs) return 0.0;
-    return sqrt(1.0 - rs / r);
+    float g = sqrt(B) / ((1.0 + x) * (1.0 - omega * lam));
+    return clamp(g, 0.05, 5.0);
 }
 
 
 // Schwarzschild trace
-vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
+// lam = L_z/E del foton (conservada): lam = -b * n_z, con n = e1 x e2.
+vec3 trace_schwarzschild(float b, float lam, vec3 e1, vec3 e2,
     float r_cam, float rs, float m, float phi_max, int n_steps,
     float r_inner, float r_outer, float base_temp, float beaming_power, float time)
 {
@@ -256,7 +264,7 @@ vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
     float limb_factor[MAX_CROSSINGS];
     int n_cross = 0;
     int ray_fate = 0;
-    float phi_final = 0.0;
+    vec3 esc_dir = vec3(0.0);
 
     float phi_prev = 0.0, r_prev = r_cam;
     float z_prev = r_prev * (cos(phi_prev) * e1.z + sin(phi_prev) * e2.z);
@@ -269,7 +277,14 @@ vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
         float phi_new = float(k + 1) * dphi;
 
         if (u_new >= u_capture) { ray_fate = 2; break; }
-        if (u_new < u_escape) { ray_fate = 1; phi_final = phi_new; break; }
+        if (u_new < u_escape) {
+            ray_fate = 1;
+            // Direccion de propagacion: tangente del ultimo segmento
+            vec3 p0 = r_prev * (cos(phi_prev) * e1 + sin(phi_prev) * e2);
+            vec3 p1 = r_new * (cos(phi_new) * e1 + sin(phi_new) * e2);
+            esc_dir = normalize(p1 - p0);
+            break;
+        }
 
         float z_new = r_new * (cos(phi_new) * e1.z + sin(phi_new) * e2.z);
         if (z_prev * z_new < 0.0 && n_cross < MAX_CROSSINGS) {
@@ -287,6 +302,8 @@ vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
                 float cte = (t_len > 1e-12) ? abs(tangent.z / t_len) : 1.0;
                 limb_factor[n_cross] = limb_darkening(cte);
                 n_cross++;
+                // Buffer lleno: el destino del rayo ya no afecta el color
+                if (n_cross >= MAX_CROSSINGS) break;
             }
         }
         phi_prev = phi_new; r_prev = r_new; z_prev = z_new;
@@ -294,78 +311,38 @@ vec3 trace_schwarzschild(float b, vec3 e1, vec3 e2, vec3 cam_pos,
     }
 
     if (n_cross == 0) {
-        if (ray_fate == 1) {
-            vec3 d_final = cos(phi_final) * e1 + sin(phi_final) * e2;
-            return starfield(d_final);
-        }
+        if (ray_fate == 1) return starfield(esc_dir);
         return vec3(0.0);
     }
 
-    float r_hit = r_cross[0];
-    float psi_hit = psi_cross[0];
-    float base_emission = novikov_thorne_emission(r_hit, r_inner);
-    float g = gravitational_redshift(r_hit, rs);
-    float D = schwarzschild_doppler(r_hit, psi_hit, e1, e2, cam_pos, m);
-    float g_d = g * D;
-
-    vec3 hit_pos = r_hit * (cos(psi_hit) * e1 + sin(psi_hit) * e2);
-    float azimuth = atan(hit_pos.y, hit_pos.x);
-    float turb = disk_turbulence(r_hit, azimuth, m, 0.0, time);
-    float intensity = base_emission * limb_factor[0] * turb * pow(g_d, beaming_power);
-
-    for (int c = 1; c < n_cross; c++) {
-        float g_e = gravitational_redshift(r_cross[c], rs);
-        float D_e = schwarzschild_doppler(r_cross[c], psi_cross[c], e1, e2, cam_pos, m);
-        float gd_e = g_e * D_e;
-        float em_e = novikov_thorne_emission(r_cross[c], r_inner);
-        vec3 hit_e = r_cross[c] * (cos(psi_cross[c]) * e1 + sin(psi_cross[c]) * e2);
-        float az_e = atan(hit_e.y, hit_e.x);
-        float turb_e = disk_turbulence(r_cross[c], az_e, m, 0.0, time);
-        intensity += em_e * limb_factor[c] * turb_e * pow(gd_e, beaming_power) * 0.5;
+    // Acumular cada cruce con su propio g-factor y color de cuerpo negro
+    float total_i = 0.0;
+    vec3 acc = vec3(0.0);
+    for (int c = 0; c < n_cross; c++) {
+        float weight = (c == 0) ? 1.0 : 0.5;  // imagenes secundarias atenuadas
+        float g_c = disk_g_factor(r_cross[c], lam, 0.0, m);
+        float em_c = novikov_thorne_emission(r_cross[c], r_inner);
+        vec3 hit_c = r_cross[c] * (cos(psi_cross[c]) * e1 + sin(psi_cross[c]) * e2);
+        float az_c = atan(hit_c.y, hit_c.x);
+        float turb_c = disk_turbulence(r_cross[c], az_c, m, 0.0, time);
+        float i_c = em_c * limb_factor[c] * turb_c * pow(g_c, beaming_power) * weight;
+        if (i_c <= 0.0) continue;
+        acc += i_c * blackbody_rgb(base_temp * g_c);
+        total_i += i_c;
     }
 
-    intensity = clamp(intensity, 0.0, 1.0);
-    if (intensity <= 0.0) return vec3(0.0);
+    if (total_i <= 0.0) return vec3(0.0);
 
-    float temp_obs = base_temp * g_d;
-    vec3 color = blackbody_rgb(temp_obs);
-    return clamp(color * sqrt(intensity), 0.0, 1.0);
+    // Color promedio ponderado + tone mapping Reinhard
+    vec3 color = acc / total_i;
+    float mapped = total_i / (1.0 + total_i);
+    return clamp(color * sqrt(mapped), 0.0, 1.0);
 }
 
 
 // =========================================================================
 // KERR: integrador de Carter (6 variables)
 // =========================================================================
-
-// Kerr combined redshift + Doppler (g-factor)
-// For a photon emitted by matter in Keplerian circular orbit in the equatorial
-// plane of a Kerr BH, the frequency ratio g = nu_obs / nu_emit is:
-//
-//   g = 1 / [ gamma * (1 - omega * xi_local) ]
-//
-// where:
-//   omega = M^{1/2} / (r^{3/2} + a M^{1/2})   Keplerian angular velocity
-//   gamma = 1 / sqrt(1 - (r^2 + a^2) omega^2 + 2 a omega / r)   (Kerr Lorentz)
-//   xi_local is the photon's conserved angular momentum per unit energy
-//
-// This properly combines gravitational redshift AND Doppler into one factor.
-// Reference: Cunningham (1975), Luminet (1979)
-//
-float kerr_g_factor(float r_hit, float xi, float a, float m) {
-    float sqrt_m = sqrt(m);
-    float r32 = pow(r_hit, 1.5);
-    float omega = sqrt_m / (r32 + a * sqrt_m);
-
-    // Effective velocity squared in Kerr (from normalization of 4-velocity)
-    float r2 = r_hit * r_hit;
-    float v2 = (r2 + a * a) * omega * omega - 2.0 * a * omega * m / r_hit;
-    v2 = clamp(v2, 0.0, 0.99);
-
-    float gamma = 1.0 / sqrt(1.0 - v2);
-    float g = 1.0 / (gamma * (1.0 - omega * xi));
-    return clamp(g, 0.05, 5.0);
-}
-
 
 vec3 trace_kerr(float xi, float eta, float beta_B,
     float r_cam, float theta_cam, float phi_cam, float a, float m,
@@ -387,10 +364,13 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
 
     float cot_t0 = cos_t0 / sin_t0;
     float Theta0 = eta + a * a * cos_t0 * cos_t0 - xi * xi * cot_t0 * cot_t0;
-    if (Theta0 < 0.0) Theta0 = 1e-4;
+    if (Theta0 < 0.0) Theta0 = 0.0;
     // p_theta = -beta_B para backward ray tracing
     float sqrt_Theta0 = sqrt(Theta0);
-    float pt_ = (beta_B > 0.0) ? -sqrt_Theta0 : sqrt_Theta0;
+    float pt_;
+    if (beta_B > 0.0) pt_ = -sqrt_Theta0;
+    else if (beta_B < 0.0) pt_ = sqrt_Theta0;
+    else pt_ = (theta_cam < PI / 2.0) ? sqrt_Theta0 : -sqrt_Theta0;
 
     // Horizonte exterior
     float disc_h = m * m - a * a;
@@ -412,6 +392,7 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     float limb_fac[MAX_CROSSINGS];
     int n_cross = 0;
     int ray_fate = 0;  // 0=orbiting, 1=escaped, 2=captured
+    vec3 esc_dir = vec3(0.0);
 
     float th_prev = theta_cam;
     float r_prev = r_cam;
@@ -420,8 +401,14 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     float eta_xi_a2 = eta + xi_a * xi_a;
 
     for (int k = 0; k < n_steps; k++) {
-        // Adaptive step: sqrt scaling for good coverage at all distances
+        // Paso adaptativo: escala sqrt con la distancia, refinado cerca del
+        // anillo de fotones donde rayos vecinos divergen exponencialmente
         float step_scale = clamp(sqrt(max(r_, 1.0) / r_cam), 0.01, 2.0);
+        step_scale *= clamp((r_ - r_plus) / (3.0 * m), 0.08, 1.0);
+        // Refinar cerca de los polos: los rayos casi meridionales tienen un
+        // turning point en theta (Theta->0) y el azimut barre pi rapidamente;
+        // un paso grueso se pasa del turning y decorrelaciona el cruce
+        step_scale *= clamp(sin(th_) / 0.15, 0.1, 1.0);
         float dlam = dlam_base * step_scale;
 
         // === k1 ===
@@ -521,15 +508,33 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
         float pt_new = pt_ + s6 * (dpt1 + 2.0*dpt2 + 2.0*dpt3 + dpt4);
         float ph_new = ph_ + s6 * (dph1 + 2.0*dph2 + 2.0*dph3 + dph4);
 
-        // Clamp theta con reflexion de momento
-        if (th_new < THETA_GUARD) { th_new = THETA_GUARD; pt_new = abs(pt_new); }
-        if (th_new > PI - THETA_GUARD) { th_new = PI - THETA_GUARD; pt_new = -abs(pt_new); }
+        // Paso polar: reflexion de momento + salto de PI en phi (el rayo
+        // pasa sobre el polo y continua en el meridiano opuesto)
+        if (th_new < THETA_GUARD) {
+            th_new = THETA_GUARD; pt_new = abs(pt_new); ph_new += PI;
+        }
+        if (th_new > PI - THETA_GUARD) {
+            th_new = PI - THETA_GUARD; pt_new = -abs(pt_new); ph_new += PI;
+        }
 
         // Captura
         if (r_new <= r_plus * 1.01) { ray_fate = 2; break; }
 
         // Escape: ray past camera and moving outward
-        if (r_new > r_cam && pr_new > 0.0) { ray_fate = 1; break; }
+        if (r_new > r_cam && pr_new > 0.0) {
+            ray_fate = 1;
+            // Direccion de propagacion: tangente del ultimo segmento (global)
+            float pg0 = ph_ + phi_cam;
+            float pg1 = ph_new + phi_cam;
+            vec3 p0 = vec3(r_ * sin(th_) * cos(pg0),
+                           r_ * sin(th_) * sin(pg0),
+                           r_ * cos(th_));
+            vec3 p1 = vec3(r_new * sin(th_new) * cos(pg1),
+                           r_new * sin(th_new) * sin(pg1),
+                           r_new * cos(th_new));
+            esc_dir = normalize(p1 - p0);
+            break;
+        }
 
         // Deteccion de cruce ecuatorial (theta cruza pi/2)
         float d_prev = th_prev - half_pi;
@@ -555,6 +560,8 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
                 float cte = (t_len > 1e-8) ? abs(tangent.z / t_len) : 1.0;
                 limb_fac[n_cross] = limb_darkening(cte);
                 n_cross++;
+                // Buffer lleno: el destino del rayo ya no afecta el color
+                if (n_cross >= MAX_CROSSINGS) break;
             }
         }
 
@@ -564,44 +571,31 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
 
     // === Colorear ===
     if (n_cross == 0) {
-        if (ray_fate == 1) {
-            // Rayo escapado: direccion final en coordenadas globales
-            float ph_global = ph_ + phi_cam;
-            float sf = max(sin(th_), THETA_GUARD);
-            vec3 d_final = vec3(sf * cos(ph_global), sf * sin(ph_global), cos(th_));
-            return starfield(normalize(d_final));
-        }
+        if (ray_fate == 1) return starfield(esc_dir);
         return vec3(0.0);
     }
 
-    // Primer cruce: colorear con Kerr g-factor
-    float r_hit = r_cross[0];
-    float phi_ray = phi_cross[0];           // phi en coordenadas del rayo
-    float phi_global = phi_ray + phi_cam;   // phi en coordenadas globales
-    float base_emission = novikov_thorne_emission(r_hit, r_inner);
-
-    // g-factor combina redshift gravitacional + Doppler de Kerr
-    float g_d = kerr_g_factor(r_hit, xi, a, m);
-
-    // Azimuth global para turbulencia y rotacion del disco
-    float azimuth = phi_global;
-    float turb = disk_turbulence(r_hit, azimuth, m, a, time);
-    float intensity = base_emission * limb_fac[0] * turb * pow(max(g_d, 0.01), beaming_power);
-
-    for (int c = 1; c < n_cross; c++) {
-        float g_e = kerr_g_factor(r_cross[c], xi, a, m);
-        float em_e = novikov_thorne_emission(r_cross[c], r_inner);
-        float az_e = phi_cross[c] + phi_cam;
-        float turb_e = disk_turbulence(r_cross[c], az_e, m, a, time);
-        intensity += em_e * limb_fac[c] * turb_e * pow(max(g_e, 0.01), beaming_power) * 0.5;
+    // Acumular cada cruce con su propio g-factor y color de cuerpo negro
+    float total_i = 0.0;
+    vec3 acc = vec3(0.0);
+    for (int c = 0; c < n_cross; c++) {
+        float weight = (c == 0) ? 1.0 : 0.5;  // imagenes secundarias atenuadas
+        float g_c = disk_g_factor(r_cross[c], xi, a, m);
+        float em_c = novikov_thorne_emission(r_cross[c], r_inner);
+        float az_c = phi_cross[c] + phi_cam;  // azimuth global para turbulencia
+        float turb_c = disk_turbulence(r_cross[c], az_c, m, a, time);
+        float i_c = em_c * limb_fac[c] * turb_c * pow(g_c, beaming_power) * weight;
+        if (i_c <= 0.0) continue;
+        acc += i_c * blackbody_rgb(base_temp * g_c);
+        total_i += i_c;
     }
 
-    intensity = clamp(intensity, 0.0, 1.0);
-    if (intensity <= 0.0) return vec3(0.0);
+    if (total_i <= 0.0) return vec3(0.0);
 
-    float temp_obs = base_temp * max(g_d, 0.1);
-    vec3 color = blackbody_rgb(temp_obs);
-    return clamp(color * sqrt(intensity), 0.0, 1.0);
+    // Color promedio ponderado + tone mapping Reinhard
+    vec3 color = acc / total_i;
+    float mapped = total_i / (1.0 + total_i);
+    return clamp(color * sqrt(mapped), 0.0, 1.0);
 }
 
 
@@ -612,13 +606,14 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
 void main() {
     float width  = u_resolution.x;
     float height = u_resolution.y;
-    float i = v_uv.x * width;
-    float j = (1.0 - v_uv.y) * height;
+    // Jitter subpixel: cada frame muestrea una posicion distinta dentro del
+    // pixel y la acumulacion temporal promedia (supersampling progresivo)
+    float i = v_uv.x * width + u_jitter.x;
+    float j = (1.0 - v_uv.y) * height + u_jitter.y;
 
     vec3 e_r     = cam_e_r(u_theta_cam, u_phi_cam);
     vec3 e_theta = cam_e_theta(u_theta_cam, u_phi_cam);
     vec3 e_phi   = cam_e_phi(u_theta_cam, u_phi_cam);
-    vec3 cam_pos = u_r_cam * e_r;
 
     float fov_rad = radians(u_fov);
     float pixel_size = fov_rad / height;
@@ -643,13 +638,18 @@ void main() {
 
         vec3 e1 = e_r;
         vec3 e2;
+        vec3 n = vec3(0.0, 0.0, 1.0);
         if (sin_psi < 1e-12) { e2 = e_theta; }
         else {
-            vec3 n = cross_rd / sin_psi;
+            n = cross_rd / sin_psi;
             e2 = normalize(cross(n, e1));
         }
 
-        color = trace_schwarzschild(b, e1, e2, cam_pos,
+        // L_z/E del foton (conservada). Coincide con xi = -alpha_B*sin(theta)
+        // de Bardeen en el limite a=0.
+        float lam = -b * n.z;
+
+        color = trace_schwarzschild(b, lam, e1, e2,
             u_r_cam, u_rs, u_m, u_phi_max, u_n_steps,
             u_r_inner, u_r_outer, u_base_temp, u_beaming_power, u_time);
     }

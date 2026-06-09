@@ -17,11 +17,11 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
-from camera import Camera
-from constants import kerr_isco, kerr_horizons, kerr_photon_sphere
-from numba_kernels import (
+from src.camera import Camera
+from src.constants import kerr_isco, kerr_horizons, kerr_photon_sphere
+from src.numba_kernels import (
     render_frame_parallel,
     kerr_render_frame_parallel,
     warmup_kerr,

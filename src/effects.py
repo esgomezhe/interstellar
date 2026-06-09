@@ -2,15 +2,87 @@
 Efectos relativistas visuales para el disco de acrecion.
 
 Implementa:
-  - Redshift gravitacional: g = sqrt(1 - rs/r)
-  - Doppler kepleriano: asimetria de brillo por rotacion del disco
-  - Beaming relativista: la intensidad observada escala como (g * D)^4
+  - g-factor exacto de Cunningham (1975): redshift gravitacional + Doppler
+    en un solo factor, usando la constante conservada L_z/E del foton
+  - Redshift gravitacional estatico y Doppler de campo debil (referencias
+    pedagogicas; el render usa el g-factor exacto)
+  - Beaming relativista: la intensidad observada escala como g^n
 """
 
 import numpy as np
 from numpy.typing import NDArray
 
 from src.constants import RS, M
+
+
+def cunningham_g_factor(
+    r_hit: float,
+    lam: float,
+    a: float = 0.0,
+    m: float = M,
+) -> float:
+    """Factor g = nu_obs/nu_em exacto para emisor en orbita Kepleriana.
+
+    g = sqrt(1 - 3M/r + 2a*sqrt(M)/r^(3/2))
+        / [(1 + a*sqrt(M)/r^(3/2)) * (1 - Omega*lam)]
+
+    El numerador junto con (1 + a*sqrt(M)/r^(3/2)) es 1/u^t del emisor
+    (Bardeen-Press-Teukolsky 1972) e incluye el redshift gravitacional Y el
+    Doppler transversal. (1 - Omega*lam) es el Doppler azimutal, donde
+    lam = L_z/E es una constante de movimiento del foton: no hace falta
+    conocer la direccion local de emision (que en espacio-tiempo curvo NO
+    es la linea recta hacia la camara).
+
+    Con a=0: g = sqrt(1 - 3M/r) / (1 - Omega*lam). En el ISCO (r=6M) y
+    foton sin momento angular: g = sqrt(1/2) ~ 0.707.
+
+    Args:
+        r_hit: Radio de emision en el disco.
+        lam: L_z/E del foton (xi de Bardeen en Kerr; -b*n_z en Schwarzschild,
+             con n la normal al plano orbital del rayo).
+        a: Spin del agujero negro.
+        m: Masa.
+
+    Returns:
+        Factor g, acotado a [0.05, 5.0].
+    """
+    sqrt_m = np.sqrt(m)
+    r32 = r_hit ** 1.5
+    omega = sqrt_m / (r32 + a * sqrt_m)
+
+    x = a * sqrt_m / r32
+    big_b = 1.0 - 3.0 * m / r_hit + 2.0 * x
+    if big_b < 1e-6:
+        big_b = 1e-6
+
+    denom = (1.0 + x) * (1.0 - omega * lam)
+    if abs(denom) < 1e-6:
+        denom = 1e-6 if denom >= 0.0 else -1e-6
+
+    g = np.sqrt(big_b) / denom
+    return float(np.clip(g, 0.05, 5.0))
+
+
+def photon_angular_momentum(
+    b: float,
+    e1: NDArray[np.float64],
+    e2: NDArray[np.float64],
+) -> float:
+    """L_z/E del foton a partir del parametro de impacto y el plano orbital.
+
+    El vector momento angular del foton es perpendicular a su plano orbital:
+    L = b*E*n con n = e1 x e2. Para el rayo trazado HACIA ATRAS desde la
+    camara, el foton fisico viaja en sentido opuesto, asi que lam = -b*n_z.
+
+    Args:
+        b: Parametro de impacto del rayo.
+        e1, e2: Base ortonormal del plano orbital (e2 = n x e1).
+
+    Returns:
+        lam = L_z/E del foton fisico.
+    """
+    n_z = e1[0] * e2[1] - e1[1] * e2[0]
+    return -b * n_z
 
 
 def gravitational_redshift(r: float, rs: float = RS) -> float:
@@ -112,11 +184,13 @@ def total_shift_factor(
     cam_position: NDArray[np.float64],
     rs: float = RS,
 ) -> float:
-    """Factor combinado de frecuencia: gravitacional * Doppler.
+    """Factor combinado de frecuencia: gravitacional * Doppler (APROXIMADO).
 
-    nu_obs / nu_emit = g * D
+    nu_obs / nu_emit ~ g * D
 
-    La intensidad observada de radiacion termica escala como (g * D)^4.
+    NOTA: aproximacion de campo debil que asume que el foton viaja en linea
+    recta hacia la camara y usa el redshift de un emisor ESTATICO. Para el
+    render usar cunningham_g_factor, que es exacto para orbitas Keplerianas.
 
     Args:
         r_hit: Radio de interseccion con el disco.

@@ -174,55 +174,49 @@ def find_crossings(phi, r, n_pts, e1_z, e2_z, r_inner, r_outer):
 # ---------------------------------------------------------------------------
 
 @njit(cache=True)
-def gravitational_redshift(r, rs):
-    """g = sqrt(1 - rs/r). Valores cercanos al horizonte -> g ~ 0."""
-    if r <= rs:
-        return 0.0
-    return np.sqrt(1.0 - rs / r)
-
-
-@njit(cache=True)
-def doppler_factor(r_hit, psi_hit, e1, e2, cam_pos, m):
+def disk_g_factor(r_hit, lam, a, m):
     """
-    Factor Doppler relativista en el punto de interseccion con el disco.
+    Factor g = nu_obs / nu_em exacto (Cunningham 1975) para un emisor en
+    orbita circular Kepleriana prograda en el plano ecuatorial.
 
-    D = 1 / (gamma * (1 - v . n_hat))
-    D > 1: lado que se acerca (blueshift)
-    D < 1: lado que se aleja (redshift)
+        g = sqrt(1 - 3M/r + 2a*sqrt(M)/r^(3/2))
+            / [(1 + a*sqrt(M)/r^(3/2)) * (1 - Omega*lam)]
+
+    - El numerador y (1 + a*sqrt(M)/r^(3/2)) forman 1/u^t del emisor
+      (Bardeen-Press-Teukolsky 1972): incluye redshift gravitacional
+      Y Doppler transversal de la orbita en un solo termino.
+    - (1 - Omega*lam) es el Doppler azimutal, con lam = L_z/E del foton
+      (cantidad CONSERVADA a lo largo de la geodesica, no requiere conocer
+      la direccion local de emision).
+    - a = 0 reduce a g = sqrt(1 - 3M/r) / (1 - Omega*lam): Schwarzschild exacto.
+
+    Args:
+        r_hit: radio Boyer-Lindquist del punto de emision.
+        lam: momento angular especifico del foton (xi en Kerr, -b*n_z en
+             Schwarzschild, donde n es la normal al plano orbital del rayo).
+        a: spin del agujero negro.
+        m: masa.
     """
-    cos_psi = np.cos(psi_hit)
-    sin_psi = np.sin(psi_hit)
+    sqrt_m = np.sqrt(m)
+    r32 = r_hit ** 1.5
+    omega = sqrt_m / (r32 + a * sqrt_m)
 
-    # Posicion 3D del punto de impacto
-    hit_x = r_hit * (cos_psi * e1[0] + sin_psi * e2[0])
-    hit_y = r_hit * (cos_psi * e1[1] + sin_psi * e2[1])
-    hit_z = r_hit * (cos_psi * e1[2] + sin_psi * e2[2])
+    x = a * sqrt_m / r32
+    B = 1.0 - 3.0 * m / r_hit + 2.0 * x
+    if B < 1e-6:
+        B = 1e-6  # bajo la orbita circular de fotones: sin orbita Kepleriana
 
-    # Direccion hacia el observador
-    to_x = cam_pos[0] - hit_x
-    to_y = cam_pos[1] - hit_y
-    to_z = cam_pos[2] - hit_z
-    dist = np.sqrt(to_x * to_x + to_y * to_y + to_z * to_z)
-    if dist < 1e-12:
-        return 1.0
-    nx = to_x / dist
-    ny = to_y / dist
-    nz = to_z / dist
+    denom = (1.0 + x) * (1.0 - omega * lam)
+    if abs(denom) < 1e-6:
+        denom = 1e-6 if denom >= 0.0 else -1e-6
 
-    # Distancia en el plano x-y para la direccion azimutal
-    r_xy = np.sqrt(hit_x * hit_x + hit_y * hit_y)
-    if r_xy < 1e-12:
-        return 1.0
+    g = np.sqrt(B) / denom
 
-    # Velocidad kepleriana en direccion azimutal (rotacion prograda)
-    v_mag = np.sqrt(m / r_hit)
-    phi_hat_x = -hit_y / r_xy
-    phi_hat_y = hit_x / r_xy
-
-    v_dot_n = v_mag * (phi_hat_x * nx + phi_hat_y * ny + 0.0 * nz)
-    gamma = 1.0 / np.sqrt(1.0 - v_mag * v_mag)
-
-    return 1.0 / (gamma * (1.0 - v_dot_n))
+    if g < 0.05:
+        g = 0.05
+    elif g > 5.0:
+        g = 5.0
+    return g
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +372,7 @@ def disk_turbulence(r, psi, e1, e2, m, t):
 
     Modula la emision con ruido procedural que rota a velocidad kepleriana.
     """
-    _TURB_AMPLITUDE = 0.2
+    _TURB_AMPLITUDE = 0.35
 
     # Posicion 3D del punto para calcular angulo azimutal
     cos_psi = np.cos(psi)
@@ -387,13 +381,14 @@ def disk_turbulence(r, psi, e1, e2, m, t):
     hit_y = r * (cos_psi * e1[1] + sin_psi * e2[1])
     azimuth = np.arctan2(hit_y, hit_x)
 
-    # Rotacion diferencial kepleriana
+    # Rotacion diferencial kepleriana + shear espiral (trailing arms)
     omega = np.sqrt(m / (r * r * r))
-    phi_rot = azimuth - omega * t
+    phi_s = azimuth - omega * t + 1.5 * np.log(r)
 
-    # Coordenadas de ruido
-    noise_x = np.log(r) * 4.0
-    noise_y = phi_rot * 3.0
+    # Muestrear el ruido sobre un circulo lo hace periodico en azimut
+    # (sin costura en phi = +-pi); log(r) desplaza el circulo radialmente
+    noise_x = np.cos(phi_s) * 2.5 + np.log(r) * 4.0
+    noise_y = np.sin(phi_s) * 2.5
     turb = _fbm(noise_x, noise_y) * 2.0 - 1.0
 
     return 1.0 + _TURB_AMPLITUDE * turb
@@ -431,11 +426,14 @@ def _starfield(direction_x, direction_y, direction_z):
 
     for layer in range(3):
         scale = 80.0 + layer * 60.0
-        cx = phi_sky * scale
+        # Numero ENTERO de celdas en phi: grid periodico, sin costura en
+        # el corte de rama de arctan2 (phi = +-pi)
+        n_phi = np.floor(2.0 * np.pi * scale)
+        u = (phi_sky + np.pi) / (2.0 * np.pi) * n_phi
         cy = theta_sky * scale
-        ix = int(np.floor(cx))
+        ix = int(np.floor(u)) % int(n_phi)
         iy = int(np.floor(cy))
-        fx = cx - ix
+        fx = u - np.floor(u)
         fy = cy - iy
 
         seed1 = (0.13 + layer * 0.07)
@@ -473,75 +471,72 @@ def _starfield(direction_x, direction_y, direction_z):
 
 @njit(cache=True)
 def _color_from_geodesic(
-    phi, r, n_pts, e1, e2, cam_pos,
+    phi, r, n_pts, e1, e2, lam,
     rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
 ):
     """
     Calcula el color RGB de un pixel dada su geodesica pre-computada.
 
-    Busca cruces con el disco, aplica efectos relativistas y colormap.
-    Si el rayo escapa sin cruzar el disco, muestra campo estelar de fondo.
+    Busca cruces con el disco, aplica el g-factor exacto de Cunningham por
+    cruce (cada imagen secundaria con su propio corrimiento), y tone mapping
+    Reinhard. Si el rayo escapa sin cruzar el disco, muestra el campo estelar.
+
+    Args:
+        lam: L_z/E del foton (conservada): lam = -b * n_z, con n = e1 x e2.
     """
     r_cross, psi_cross, c_idx, n_cross = find_crossings(
         phi, r, n_pts, e1[2], e2[2], r_inner, r_outer,
     )
 
     if n_cross == 0:
-        if fate == 1:  # rayo escapado -> estrellas
-            phi_final = phi[n_pts - 1]
-            dx = np.cos(phi_final) * e1[0] + np.sin(phi_final) * e2[0]
-            dy = np.cos(phi_final) * e1[1] + np.sin(phi_final) * e2[1]
-            dz = np.cos(phi_final) * e1[2] + np.sin(phi_final) * e2[2]
-            return _starfield(dx, dy, dz)
+        if fate == 1 and n_pts >= 2:  # rayo escapado -> estrellas
+            # Direccion de propagacion: tangente entre los dos ultimos puntos
+            k = n_pts - 1
+            cp0, sp0 = np.cos(phi[k - 1]), np.sin(phi[k - 1])
+            cp1, sp1 = np.cos(phi[k]), np.sin(phi[k])
+            dx = r[k] * (cp1 * e1[0] + sp1 * e2[0]) - r[k - 1] * (cp0 * e1[0] + sp0 * e2[0])
+            dy = r[k] * (cp1 * e1[1] + sp1 * e2[1]) - r[k - 1] * (cp0 * e1[1] + sp0 * e2[1])
+            dz = r[k] * (cp1 * e1[2] + sp1 * e2[2]) - r[k - 1] * (cp0 * e1[2] + sp0 * e2[2])
+            d_len = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if d_len < 1e-12:
+                return 0.0, 0.0, 0.0
+            return _starfield(dx / d_len, dy / d_len, dz / d_len)
         return 0.0, 0.0, 0.0
 
-    # Primer cruce (mas cercano a la camara)
-    r_hit = r_cross[0]
-    psi_hit = psi_cross[0]
-    base_emission = novikov_thorne_emission(r_hit, r_inner)
-    limb = _compute_limb_factor(psi_hit, e1, e2, phi, r, c_idx[0], n_pts)
+    # Acumular cada cruce con su propio g-factor y color de cuerpo negro
+    total_i = 0.0
+    acc_r = 0.0
+    acc_g = 0.0
+    acc_b = 0.0
+    for c in range(n_cross):
+        weight = 1.0 if c == 0 else 0.5  # imagenes secundarias atenuadas
+        g_c = disk_g_factor(r_cross[c], lam, 0.0, m)
+        emission = novikov_thorne_emission(r_cross[c], r_inner)
+        limb = _compute_limb_factor(psi_cross[c], e1, e2, phi, r, c_idx[c], n_pts)
+        turb = disk_turbulence(r_cross[c], psi_cross[c], e1, e2, m, t)
+        i_c = emission * limb * turb * g_c ** beaming_power * weight
+        if i_c <= 0.0:
+            continue
+        cr, cg, cb = blackbody_rgb(base_temp * g_c)
+        total_i += i_c
+        acc_r += i_c * cr
+        acc_g += i_c * cg
+        acc_b += i_c * cb
 
-    g = gravitational_redshift(r_hit, rs)
-    D = doppler_factor(r_hit, psi_hit, e1, e2, cam_pos, m)
-    g_d = g * D
-
-    turb = disk_turbulence(r_hit, psi_hit, e1, e2, m, t)
-    intensity = base_emission * limb * turb * g_d ** beaming_power
-
-    # Contribucion de cruces adicionales (imagenes secundarias)
-    for c in range(1, n_cross):
-        g_extra = gravitational_redshift(r_cross[c], rs)
-        D_extra = doppler_factor(r_cross[c], psi_cross[c], e1, e2, cam_pos, m)
-        g_d_extra = g_extra * D_extra
-        extra_emission = novikov_thorne_emission(r_cross[c], r_inner)
-        limb_extra = _compute_limb_factor(psi_cross[c], e1, e2, phi, r, c_idx[c], n_pts)
-        turb_extra = disk_turbulence(r_cross[c], psi_cross[c], e1, e2, m, t)
-        intensity += extra_emission * limb_extra * turb_extra * g_d_extra ** beaming_power * 0.5
-
-    if intensity > 1.0:
-        intensity = 1.0
-    if intensity <= 0.0:
+    if total_i <= 0.0:
         return 0.0, 0.0, 0.0
 
-    # Color: temperatura observada -> RGB de cuerpo negro
-    temp_obs = base_temp * g_d
-    cr, cg, cb = blackbody_rgb(temp_obs)
+    # Color promedio ponderado por intensidad de cada cruce
+    inv_i = 1.0 / total_i
+    cr = acc_r * inv_i
+    cg = acc_g * inv_i
+    cb = acc_b * inv_i
 
-    # Brillo con compresion sqrt para rango dinamico
-    brightness = intensity ** 0.5
+    # Tone mapping Reinhard + compresion sqrt para rango dinamico
+    mapped = total_i / (1.0 + total_i)
+    brightness = mapped ** 0.5
 
-    cr = cr * brightness
-    cg = cg * brightness
-    cb = cb * brightness
-
-    if cr > 1.0:
-        cr = 1.0
-    if cg > 1.0:
-        cg = 1.0
-    if cb > 1.0:
-        cb = 1.0
-
-    return cr, cg, cb
+    return min(cr * brightness, 1.0), min(cg * brightness, 1.0), min(cb * brightness, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -603,8 +598,11 @@ def render_frame_parallel(
         # Pixel izquierdo
         e1_left = e1_arr[j, i]
         e2_left = e2_arr[j, i]
+        # L_z/E del foton: lam = -b * n_z, con n = e1 x e2 (normal al plano orbital)
+        n_z_left = e1_left[0] * e2_left[1] - e1_left[1] * e2_left[0]
+        lam_left = -b * n_z_left
         cr, cg, cb = _color_from_geodesic(
-            phi, r, n_valid, e1_left, e2_left, cam_pos,
+            phi, r, n_valid, e1_left, e2_left, lam_left,
             rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
         )
         image[j, i, 0] = cr
@@ -615,8 +613,10 @@ def render_frame_parallel(
         if i != i_mirror:
             e1_right = e1_arr[j, i_mirror]
             e2_right = e2_arr[j, i_mirror]
+            n_z_right = e1_right[0] * e2_right[1] - e1_right[1] * e2_right[0]
+            lam_right = -b * n_z_right
             cr, cg, cb = _color_from_geodesic(
-                phi, r, n_valid, e1_right, e2_right, cam_pos,
+                phi, r, n_valid, e1_right, e2_right, lam_right,
                 rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
             )
             image[j, i_mirror, 0] = cr
@@ -805,13 +805,16 @@ def trace_kerr_geodesic_rk4(xi, eta, r_cam, theta_cam, a, m, lam_max, n_steps,
             a, xi, eta, m, dlam,
         )
 
-        # Proteccion: theta en [THETA_GUARD, pi-THETA_GUARD]
+        # Paso polar: reflexion de momento + salto de pi en phi (el rayo
+        # pasa sobre el polo y continua en el meridiano opuesto)
         if theta_new < 0.01:
             theta_new = 0.01
             pt_new = abs(pt_new)
+            phi_new += np.pi
         elif theta_new > np.pi - 0.01:
             theta_new = np.pi - 0.01
             pt_new = -abs(pt_new)
+            phi_new += np.pi
 
         r_arr[k + 1] = r_new
         theta_arr[k + 1] = theta_new
@@ -879,40 +882,12 @@ def kerr_find_crossings(r_arr, theta_arr, phi_arr, n_pts, r_inner, r_outer):
 @njit(cache=True)
 def kerr_g_factor(r_hit, xi, a, m):
     """
-    Factor g unificado de Cunningham (1975): redshift + Doppler combinados.
+    Factor g de Cunningham (1975) en Kerr: alias de disk_g_factor.
 
-    g = 1 / [gamma * (1 - omega * xi)]
-
-    Donde:
-      omega = sqrt(M) / (r^(3/2) + a*sqrt(M))  (Keplerian progrado)
-      v^2 = (r^2 + a^2)*omega^2 - 2*a*omega*M/r
-      gamma = 1 / sqrt(1 - v^2)
-
-    Usa xi (constante conservada) en vez de angulos locales, evitando
-    el error de usar phi_ray (que empieza en 0 para cada rayo).
-
-    Reference: Cunningham (1975), Luminet (1979).
+    xi = L_z/E es la constante conservada del foton (Bardeen), por lo que
+    el g-factor es exacto sin necesitar la direccion local de emision.
     """
-    sqrt_m = np.sqrt(m)
-    r32 = r_hit ** 1.5
-    omega = sqrt_m / (r32 + a * sqrt_m)
-
-    r2 = r_hit * r_hit
-    v2 = (r2 + a * a) * omega * omega - 2.0 * a * omega * m / r_hit
-    if v2 < 0.0:
-        v2 = 0.0
-    elif v2 > 0.99:
-        v2 = 0.99
-
-    gamma = 1.0 / np.sqrt(1.0 - v2)
-    g = 1.0 / (gamma * (1.0 - omega * xi))
-
-    if g < 0.05:
-        g = 0.05
-    elif g > 5.0:
-        g = 5.0
-
-    return g
+    return disk_g_factor(r_hit, xi, a, m)
 
 
 @njit(cache=True)
@@ -952,15 +927,17 @@ def _kerr_limb_factor(r_arr, theta_arr, phi_arr, cross_idx, n_valid):
 @njit(cache=True)
 def _kerr_disk_turbulence(r_hit, phi_hit, m, a, t):
     """Turbulencia del disco en Kerr con rotacion Kepleriana."""
-    _TURB_AMPLITUDE = 0.2
+    _TURB_AMPLITUDE = 0.35
 
     sqrt_m = np.sqrt(m)
     r32 = r_hit ** 1.5
     omega = sqrt_m / (r32 + a * sqrt_m)
-    phi_rot = phi_hit - omega * t
+    # Rotacion diferencial + shear espiral, periodico en azimut
+    # (consistente con disk_turbulence y el shader)
+    phi_s = phi_hit - omega * t + 1.5 * np.log(r_hit)
 
-    noise_x = np.log(r_hit) * 4.0
-    noise_y = phi_rot * 3.0
+    noise_x = np.cos(phi_s) * 2.5 + np.log(r_hit) * 4.0
+    noise_y = np.sin(phi_s) * 2.5
     turb = _fbm(noise_x, noise_y) * 2.0 - 1.0
 
     return 1.0 + _TURB_AMPLITUDE * turb
@@ -978,57 +955,58 @@ def _kerr_color_from_geodesic(
     )
 
     if n_cross == 0:
-        if fate == 1:  # rayo escapado -> estrellas
-            # Direccion final del rayo en cartesianas
-            r_f = r_arr[n_pts - 1]
-            th_f = theta_arr[n_pts - 1]
-            ph_f = phi_arr[n_pts - 1]
-            dx = np.sin(th_f) * np.cos(ph_f)
-            dy = np.sin(th_f) * np.sin(ph_f)
-            dz = np.cos(th_f)
-            return _starfield(dx, dy, dz)
+        if fate == 1 and n_pts >= 2:  # rayo escapado -> estrellas
+            # Direccion de propagacion: tangente entre los dos ultimos puntos
+            k = n_pts - 1
+            x0 = r_arr[k - 1] * np.sin(theta_arr[k - 1]) * np.cos(phi_arr[k - 1])
+            y0 = r_arr[k - 1] * np.sin(theta_arr[k - 1]) * np.sin(phi_arr[k - 1])
+            z0 = r_arr[k - 1] * np.cos(theta_arr[k - 1])
+            x1 = r_arr[k] * np.sin(theta_arr[k]) * np.cos(phi_arr[k])
+            y1 = r_arr[k] * np.sin(theta_arr[k]) * np.sin(phi_arr[k])
+            z1 = r_arr[k] * np.cos(theta_arr[k])
+            dx = x1 - x0
+            dy = y1 - y0
+            dz = z1 - z0
+            d_len = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if d_len < 1e-12:
+                return 0.0, 0.0, 0.0
+            return _starfield(dx / d_len, dy / d_len, dz / d_len)
         return 0.0, 0.0, 0.0
 
-    # Primer cruce
-    r_hit = r_cross[0]
-    phi_hit = phi_cross[0]
-    base_emission = novikov_thorne_emission(r_hit, r_inner)
-    limb = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[0], n_pts)
+    # Acumular cada cruce con su propio g-factor y color de cuerpo negro
+    total_i = 0.0
+    acc_r = 0.0
+    acc_g = 0.0
+    acc_b = 0.0
+    for c in range(n_cross):
+        weight = 1.0 if c == 0 else 0.5  # imagenes secundarias atenuadas
+        g_c = disk_g_factor(r_cross[c], xi, a, m)
+        emission = novikov_thorne_emission(r_cross[c], r_inner)
+        limb = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[c], n_pts)
+        turb = _kerr_disk_turbulence(r_cross[c], phi_cross[c], m, a, t)
+        i_c = emission * limb * turb * g_c ** beaming_power * weight
+        if i_c <= 0.0:
+            continue
+        cr, cg, cb = blackbody_rgb(base_temp * g_c)
+        total_i += i_c
+        acc_r += i_c * cr
+        acc_g += i_c * cg
+        acc_b += i_c * cb
 
-    # g-factor de Cunningham: redshift + Doppler unificado
-    g_d = kerr_g_factor(r_hit, xi, a, m)
-
-    turb = _kerr_disk_turbulence(r_hit, phi_hit, m, a, t)
-    intensity = base_emission * limb * turb * max(g_d, 0.01) ** beaming_power
-
-    # Cruces adicionales
-    for c in range(1, n_cross):
-        g_d_extra = kerr_g_factor(r_cross[c], xi, a, m)
-        extra_emission = novikov_thorne_emission(r_cross[c], r_inner)
-        limb_extra = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[c], n_pts)
-        turb_extra = _kerr_disk_turbulence(r_cross[c], phi_cross[c], m, a, t)
-        intensity += extra_emission * limb_extra * turb_extra * max(g_d_extra, 0.01) ** beaming_power * 0.5
-
-    # Usar tone mapping en lugar de clamp duro para preservar rango dinamico
-    # Reinhard: I_mapped = I / (1 + I)
-    if intensity <= 0.0:
+    if total_i <= 0.0:
         return 0.0, 0.0, 0.0
-    intensity = intensity / (1.0 + intensity)
 
-    temp_obs = base_temp * g_d
-    # Clamp temperatura a rango valido de blackbody_rgb
-    if temp_obs < 1000.0:
-        temp_obs = 1000.0
-    elif temp_obs > 40000.0:
-        temp_obs = 40000.0
-    cr, cg, cb = blackbody_rgb(temp_obs)
-    brightness = intensity ** 0.5
+    # Color promedio ponderado por intensidad de cada cruce
+    inv_i = 1.0 / total_i
+    cr = acc_r * inv_i
+    cg = acc_g * inv_i
+    cb = acc_b * inv_i
 
-    cr = min(cr * brightness, 1.0)
-    cg = min(cg * brightness, 1.0)
-    cb = min(cb * brightness, 1.0)
+    # Tone mapping Reinhard + compresion sqrt para rango dinamico
+    mapped = total_i / (1.0 + total_i)
+    brightness = mapped ** 0.5
 
-    return cr, cg, cb
+    return min(cr * brightness, 1.0), min(cg * brightness, 1.0), min(cb * brightness, 1.0)
 
 
 @njit(parallel=True, cache=True)

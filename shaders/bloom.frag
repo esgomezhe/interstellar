@@ -7,6 +7,8 @@
  * Modo 1: blur horizontal
  * Modo 2: blur vertical
  * Modo 3: composicion final (original + bloom)
+ * Modo 4: suavizado gaussiano 3x3
+ * Modo 5: acumulacion temporal (TAA) — mezcla frame nuevo con historico
  */
 
 in vec2 v_uv;
@@ -17,6 +19,7 @@ uniform sampler2D u_bloom_texture;
 uniform int u_mode;
 uniform float u_threshold;     // umbral de brillo para extraccion
 uniform float u_intensity;     // intensidad del bloom
+uniform float u_blend;         // peso del frame nuevo en la acumulacion TAA
 uniform vec2 u_texel_size;     // 1.0 / resolution
 
 // Pesos gaussianos (kernel 9-tap)
@@ -58,6 +61,13 @@ void main() {
         vec3 original = texture(u_texture, v_uv).rgb;
         vec3 bloom = texture(u_bloom_texture, v_uv).rgb;
         frag_color = vec4(original + bloom * u_intensity, 1.0);
+    }
+    else if (u_mode == 5) {
+        // TAA: media movil exponencial. u_texture = frame nuevo,
+        // u_bloom_texture = acumulado historico
+        vec3 current = texture(u_texture, v_uv).rgb;
+        vec3 history = texture(u_bloom_texture, v_uv).rgb;
+        frag_color = vec4(mix(history, current, u_blend), 1.0);
     }
     else {
         // Mode 4: gentle 3x3 Gaussian smooth

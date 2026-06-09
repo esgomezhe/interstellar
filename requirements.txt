@@ -7,3 +7,6 @@ imageio>=2.34
 imageio-ffmpeg>=0.4
 pyyaml>=6.0
 tqdm>=4.66
+moderngl>=5.10
+glfw>=2.6
+pytest>=8.0

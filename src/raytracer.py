@@ -21,7 +21,11 @@ from src.camera import Camera, RayInfo
 from src.colormap import disk_color
 from src.constants import RS
 from src.disk import AccretionDisk
-from src.effects import total_shift_factor, observed_intensity
+from src.effects import (
+    cunningham_g_factor,
+    observed_intensity,
+    photon_angular_momentum,
+)
 from src.geodesics import trace_geodesic, RayFate
 
 
@@ -82,16 +86,15 @@ def trace_pixel(
         base_emission = disk.emission(r_hit)
 
         if enable_effects:
-            # Factor combinado gravitacional + Doppler
-            g_d = total_shift_factor(r_hit, psi_hit, ray.e1, ray.e2, cam_position, rs)
+            # g-factor exacto de Cunningham via L_z/E conservada del foton
+            lam = photon_angular_momentum(ray.b, ray.e1, ray.e2)
+            g_d = cunningham_g_factor(r_hit, lam)
             # Intensidad con beaming relativista
             intensity = observed_intensity(base_emission, g_d)
 
             # Contribucion de cruces adicionales (imagenes secundarias)
             for r_extra, psi_extra in crossings[1:]:
-                g_d_extra = total_shift_factor(
-                    r_extra, psi_extra, ray.e1, ray.e2, cam_position, rs,
-                )
+                g_d_extra = cunningham_g_factor(r_extra, lam)
                 intensity += observed_intensity(
                     disk.emission(r_extra), g_d_extra,
                 ) * 0.5

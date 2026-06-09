@@ -6,3 +6,4 @@ outputs/
 *.npy
 .venv/
 venv/
+.atl/
