@@ -24,6 +24,7 @@ from src.constants import kerr_isco, kerr_horizons, kerr_photon_sphere
 from src.numba_kernels import (
     render_frame_parallel,
     kerr_render_frame_parallel,
+    trace_kerr_geodesic_rk4,
     warmup_kerr,
 )
 
@@ -51,7 +52,7 @@ def test_a0_regression():
     img_sch = render_frame_parallel(
         b_arr, e1_arr, e2_arr, cam.position,
         30.0, 2.0, 1.0, 50.0, 800,
-        6.0, 20.0, 2200.0, 3.0,
+        6.0, 20.0, 4000.0, 3.0,
     )
 
     # Kerr a=0
@@ -61,7 +62,7 @@ def test_a0_regression():
         xi_arr, eta_arr, beta_B_arr,
         30.0, np.radians(75.0), 0.0, 1.0,
         300.0, 800,
-        6.0, 20.0, 2200.0, 3.0,
+        6.0, 20.0, 4000.0, 3.0,
     )
 
     # Comparar pixeles con disco (no negros)
@@ -102,7 +103,7 @@ def test_asymmetric_shadow():
         xi_arr, eta_arr, beta_B_arr,
         30.0, np.radians(85.0), 0.998, 1.0,
         300.0, 1200,
-        r_inner, 20.0, 2200.0, 3.0,
+        r_inner, 20.0, 4000.0, 3.0,
     )
 
     brightness = np.sum(img, axis=2)
@@ -158,7 +159,7 @@ def test_doppler_beaming():
         xi_arr, eta_arr, beta_B_arr,
         30.0, np.radians(85.0), 0.0, 1.0,
         300.0, 800,
-        6.0, 20.0, 2200.0, 3.0,
+        6.0, 20.0, 4000.0, 3.0,
     )
 
     brightness = np.sum(img, axis=2)
@@ -179,6 +180,88 @@ def test_doppler_beaming():
     return ok
 
 
+def _analytic_shadow_edges(a, m=1.0):
+    """
+    Bordes ecuatoriales (beta=0) de la sombra segun la curva critica de
+    Bardeen (1973), para observador en theta=90 grados e infinito.
+
+    Para orbitas esfericas de fotones, R(r)=R'(r)=0 da:
+        xi(r) = [r^2 + a^2 - 4*r*Delta/(2(r-M))] / a
+    Las orbitas ECUATORIALES (eta=0) son r_ph progrado y retrogrado,
+    y los bordes de la sombra en el ecuador son alpha = -xi(r_ph).
+
+    Para a=0 la sombra es circular de radio 3*sqrt(3)*M.
+    """
+    if a < 1e-6:
+        s = 3.0 * np.sqrt(3.0) * m
+        return -s, s
+
+    def xi_of(rt):
+        delta = rt * rt - 2.0 * m * rt + a * a
+        return (rt * rt + a * a - 4.0 * rt * delta / (2.0 * (rt - m))) / a
+
+    r_pro = kerr_photon_sphere(a, m, prograde=True)
+    r_ret = kerr_photon_sphere(a, m, prograde=False)
+    # alpha = -xi: el borde progrado (xi>0) queda en alpha<0 y viceversa
+    edges = sorted((-xi_of(r_pro), -xi_of(r_ret)))
+    return edges[0], edges[1]
+
+
+def _measured_shadow_edge(a, alpha_in, alpha_out, m=1.0, r_cam=30.0, tol=1e-3):
+    """
+    Localiza el borde de la sombra por biseccion sobre alpha_B en beta=0.
+
+    Lanza rayos ecuatoriales (eta=0) con el integrador real y biseca la
+    transicion capturado <-> escapado. alpha_in debe caer dentro de la
+    sombra y alpha_out fuera.
+    """
+    theta_cam = np.pi / 2.0
+
+    def captured(alpha_B):
+        xi = -alpha_B  # sin(theta_cam) = 1
+        _, _, _, _, fate = trace_kerr_geodesic_rk4(
+            xi, 0.0, r_cam, theta_cam, a, m, 300.0, 6000, 0.0,
+        )
+        return fate != 1  # capturado u orbitando = dentro
+
+    lo, hi = alpha_in, alpha_out
+    if not captured(lo) or captured(hi):
+        return float("nan")
+    while abs(hi - lo) > tol:
+        mid = 0.5 * (lo + hi)
+        if captured(mid):
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def test_shadow_boundary():
+    """Frontera de la sombra vs curva critica analitica de Bardeen."""
+    print("\n[5] Frontera de la sombra vs analitico (Bardeen 1973)")
+
+    all_ok = True
+    for a in [0.0, 0.5, 0.9, 0.998]:
+        al_left, al_right = _analytic_shadow_edges(a)
+        # Biseccion partiendo de dentro de la sombra (alpha=0) hacia afuera
+        m_left = _measured_shadow_edge(a, -1.0, al_left * 1.5)
+        m_right = _measured_shadow_edge(a, 1.0, al_right * 1.5)
+
+        err_l = abs(m_left - al_left) / abs(al_left)
+        err_r = abs(m_right - al_right) / abs(al_right)
+        # Tolerancia 5%: la camara esta a r=30M (no en infinito) y la
+        # captura se declara en r+ * 1.01
+        ok = err_l < 0.05 and err_r < 0.05
+        status = "PASS" if ok else "FAIL"
+        print(f"    a={a:.3f}: borde izq {m_left:+.3f} (teo {al_left:+.3f}, "
+              f"err {100*err_l:.1f}%) | der {m_right:+.3f} (teo {al_right:+.3f}, "
+              f"err {100*err_r:.1f}%) {status}")
+        if not ok:
+            all_ok = False
+
+    return all_ok
+
+
 def main():
     print("=" * 60)
     print("  Validacion Fisica del Integrador Kerr")
@@ -194,7 +277,7 @@ def main():
     e1 = np.array([[[*rays[0][0].e1]]])
     e2 = np.array([[[*rays[0][0].e2]]])
     render_frame_parallel(b, e1, e2, cam_warmup.position,
-                          30.0, 2.0, 1.0, 50.0, 100, 6.0, 20.0, 2200.0, 3.0)
+                          30.0, 2.0, 1.0, 50.0, 100, 6.0, 20.0, 4000.0, 3.0)
     print("JIT listo.\n")
 
     results = []
@@ -202,6 +285,7 @@ def main():
     results.append(("Sombra asimetrica", test_asymmetric_shadow()))
     results.append(("ISCO vs spin", test_isco_with_spin()))
     results.append(("Beaming Doppler", test_doppler_beaming()))
+    results.append(("Frontera de sombra vs Bardeen", test_shadow_boundary()))
 
     print("\n" + "=" * 60)
     print("  Resultados")
