@@ -152,7 +152,7 @@ def main() -> None:
 
     fov = 30.0
     n_steps = 3000
-    base_temp = 2200.0
+    base_temp = 4000.0
     beaming_power = 3.0
 
     # ISCO y horizonte dinamicos

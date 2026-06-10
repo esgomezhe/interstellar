@@ -24,7 +24,7 @@ _RS: float = 2.0
 _M: float = 1.0
 _R_ISCO: float = 6.0
 _R_DISK_OUTER: float = 20.0
-_T_BASE: float = 2200.0
+_T_BASE: float = 4000.0
 _BEAMING_POWER: float = 3.0
 _MAX_CROSSINGS: int = 5
 
@@ -395,20 +395,82 @@ def disk_turbulence(r, psi, e1, e2, m, t):
 
 
 @njit(cache=True)
-def novikov_thorne_emission(r, r_isco):
+def page_thorne_flux(r, r_isco, a, m):
     """
-    Perfil de emision Novikov-Thorne para disco delgado en Schwarzschild.
+    Flujo del disco delgado relativista (Page & Thorne 1974, ec. 15n).
 
-    T(r) = (r_isco/r)^(3/4) * (1 - sqrt(r_isco/r))^(1/4)
-
-    La condicion de torque cero en el ISCO hace que la emision caiga a cero
-    exactamente en r = r_isco, creando un borde interior oscuro realista.
+    Version exacta (dependiente del spin) del perfil Novikov-Thorne
+    aproximado que se usaba antes. Copia njit de la referencia en
+    src/constants.py (mantener sincronizadas — hay test de consistencia).
     """
-    ratio = r_isco / r
-    factor = 1.0 - np.sqrt(ratio)
-    if factor <= 0.0:
+    if r <= r_isco:
         return 0.0
-    return ratio ** 0.75 * factor ** 0.25
+    a_star = a / m
+    x = np.sqrt(r / m)
+    x0 = np.sqrt(r_isco / m)
+
+    acs = np.arccos(min(max(a_star, 0.0), 1.0))
+    x1 = 2.0 * np.cos((acs - np.pi) / 3.0)
+    x2 = 2.0 * np.cos((acs + np.pi) / 3.0)
+    x3 = -2.0 * np.cos(acs / 3.0)
+
+    d1 = x1 * (x1 - x2) * (x1 - x3)
+    d2 = x2 * (x2 - x1) * (x2 - x3)
+    d3 = x3 * (x3 - x1) * (x3 - x2)
+    c1 = 3.0 * (x1 - a_star) ** 2 / d1
+    # a* = 0: x2 -> 0 y el limite de c2 es 0 (numerador ~ x2²)
+    c2 = 0.0 if abs(d2) < 1e-9 else 3.0 * (x2 - a_star) ** 2 / d2
+    c3 = 3.0 * (x3 - a_star) ** 2 / d3
+
+    eps = 1e-9
+    x_m_x2 = x - x2
+    if x_m_x2 < eps:
+        x_m_x2 = eps
+    x0_m_x2 = x0 - x2
+    if x0_m_x2 < eps:
+        x0_m_x2 = eps
+
+    bracket = (
+        x - x0
+        - 1.5 * a_star * np.log(x / x0)
+        - c1 * np.log((x - x1) / (x0 - x1))
+        - c2 * np.log(x_m_x2 / x0_m_x2)
+        - c3 * np.log((x - x3) / (x0 - x3))
+    )
+    flux = bracket / (x ** 4 * (x ** 3 - 3.0 * x + 2.0 * a_star))
+    if flux < 0.0:
+        flux = 0.0
+    return flux
+
+
+@njit(cache=True)
+def page_thorne_norm_inv(r_isco, r_outer, a, m):
+    """
+    Normalizacion de exposicion: 1/F en el radio medio geometrico.
+
+    El nucleo del disco queda > 1 (HDR): Reinhard absorbe el exceso de
+    brillo y el cuerpo negro se corre al blanco. Ver src/constants.py.
+    """
+    r_ref = np.sqrt(r_isco * r_outer)
+    f_ref = page_thorne_flux(r_ref, r_isco, a, m)
+    if f_ref <= 0.0:
+        return 0.0
+    return 1.0 / f_ref
+
+
+@njit(cache=True)
+def page_thorne_emission(r, r_isco, a, m, f_norm_inv):
+    """
+    Perfil de temperatura relativo: T_norm = (F/F_ref)^(1/4).
+
+    Stefan-Boltzmann: F = sigma*T^4, asi que la temperatura local del disco
+    es T(r) = T_ref * T_norm(r) y el brillo es T_norm^4. T_norm > 1 cerca
+    del pico de emision (nucleo HDR).
+    """
+    f_norm = page_thorne_flux(r, r_isco, a, m) * f_norm_inv
+    if f_norm <= 0.0:
+        return 0.0
+    return f_norm ** 0.25
 
 
 @njit(cache=True)
@@ -472,7 +534,7 @@ def _starfield(direction_x, direction_y, direction_z):
 @njit(cache=True)
 def _color_from_geodesic(
     phi, r, n_pts, e1, e2, lam,
-    rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
+    rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate, f_pt_inv,
 ):
     """
     Calcula el color RGB de un pixel dada su geodesica pre-computada.
@@ -511,13 +573,16 @@ def _color_from_geodesic(
     for c in range(n_cross):
         weight = 1.0 if c == 0 else 0.5  # imagenes secundarias atenuadas
         g_c = disk_g_factor(r_cross[c], lam, 0.0, m)
-        emission = novikov_thorne_emission(r_cross[c], r_inner)
+        # T_norm para el color; el BRILLO sigue al flujo F = T_norm^4
+        # (Stefan-Boltzmann: la potencia radiada va como T^4)
+        t_norm = page_thorne_emission(r_cross[c], r_inner, 0.0, m, f_pt_inv)
+        f_norm = t_norm ** 4
         limb = _compute_limb_factor(psi_cross[c], e1, e2, phi, r, c_idx[c], n_pts)
         turb = disk_turbulence(r_cross[c], psi_cross[c], e1, e2, m, t)
-        i_c = emission * limb * turb * g_c ** beaming_power * weight
+        i_c = f_norm * limb * turb * g_c ** beaming_power * weight
         if i_c <= 0.0:
             continue
-        cr, cg, cb = blackbody_rgb(base_temp * g_c)
+        cr, cg, cb = blackbody_rgb(base_temp * t_norm * g_c)
         total_i += i_c
         acc_r += i_c * cr
         acc_g += i_c * cg
@@ -532,9 +597,10 @@ def _color_from_geodesic(
     cg = acc_g * inv_i
     cb = acc_b * inv_i
 
-    # Tone mapping Reinhard + compresion sqrt para rango dinamico
+    # Tone mapping Reinhard; la compresion perceptual la hace el gamma del
+    # display (una sola compresion — dos aplastarian el rango del flujo fisico)
     mapped = total_i / (1.0 + total_i)
-    brightness = mapped ** 0.5
+    brightness = mapped
 
     return min(cr * brightness, 1.0), min(cg * brightness, 1.0), min(cb * brightness, 1.0)
 
@@ -583,6 +649,9 @@ def render_frame_parallel(
     image = np.zeros((h, w, 3))
     half_w = (w + 1) // 2  # mitad redondeada arriba (para anchos impares)
 
+    # Normalizacion del perfil Page-Thorne (una vez por frame)
+    f_pt_inv = page_thorne_norm_inv(r_inner, r_outer, 0.0, m)
+
     for idx in prange(h * half_w):
         j = idx // half_w
         i = idx % half_w
@@ -603,7 +672,7 @@ def render_frame_parallel(
         lam_left = -b * n_z_left
         cr, cg, cb = _color_from_geodesic(
             phi, r, n_valid, e1_left, e2_left, lam_left,
-            rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
+            rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate, f_pt_inv,
         )
         image[j, i, 0] = cr
         image[j, i, 1] = cg
@@ -617,7 +686,7 @@ def render_frame_parallel(
             lam_right = -b * n_z_right
             cr, cg, cb = _color_from_geodesic(
                 phi, r, n_valid, e1_right, e2_right, lam_right,
-                rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate,
+                rs, m, r_inner, r_outer, base_temp, beaming_power, t, fate, f_pt_inv,
             )
             image[j, i_mirror, 0] = cr
             image[j, i_mirror, 1] = cg
@@ -645,7 +714,7 @@ def warmup():
     render_frame_parallel(
         b, e1, e2, cam,
         30.0, 2.0, 1.0, 10.0, 100,
-        6.0, 20.0, 2200.0, 3.0,
+        6.0, 20.0, 4000.0, 3.0,
     )
 
 
@@ -947,7 +1016,7 @@ def _kerr_disk_turbulence(r_hit, phi_hit, m, a, t):
 def _kerr_color_from_geodesic(
     r_arr, theta_arr, phi_arr, n_pts,
     r_cam, theta_cam, xi, a, m,
-    r_inner, r_outer, base_temp, beaming_power, t, fate,
+    r_inner, r_outer, base_temp, beaming_power, t, fate, f_pt_inv,
 ):
     """Calcula el color RGB para un pixel en Kerr."""
     r_cross, phi_cross, c_idx, n_cross = kerr_find_crossings(
@@ -981,13 +1050,16 @@ def _kerr_color_from_geodesic(
     for c in range(n_cross):
         weight = 1.0 if c == 0 else 0.5  # imagenes secundarias atenuadas
         g_c = disk_g_factor(r_cross[c], xi, a, m)
-        emission = novikov_thorne_emission(r_cross[c], r_inner)
+        # T_norm para el color; el BRILLO sigue al flujo F = T_norm^4
+        # (Stefan-Boltzmann: la potencia radiada va como T^4)
+        t_norm = page_thorne_emission(r_cross[c], r_inner, a, m, f_pt_inv)
+        f_norm = t_norm ** 4
         limb = _kerr_limb_factor(r_arr, theta_arr, phi_arr, c_idx[c], n_pts)
         turb = _kerr_disk_turbulence(r_cross[c], phi_cross[c], m, a, t)
-        i_c = emission * limb * turb * g_c ** beaming_power * weight
+        i_c = f_norm * limb * turb * g_c ** beaming_power * weight
         if i_c <= 0.0:
             continue
-        cr, cg, cb = blackbody_rgb(base_temp * g_c)
+        cr, cg, cb = blackbody_rgb(base_temp * t_norm * g_c)
         total_i += i_c
         acc_r += i_c * cr
         acc_g += i_c * cg
@@ -1002,9 +1074,10 @@ def _kerr_color_from_geodesic(
     cg = acc_g * inv_i
     cb = acc_b * inv_i
 
-    # Tone mapping Reinhard + compresion sqrt para rango dinamico
+    # Tone mapping Reinhard; la compresion perceptual la hace el gamma del
+    # display (una sola compresion — dos aplastarian el rango del flujo fisico)
     mapped = total_i / (1.0 + total_i)
-    brightness = mapped ** 0.5
+    brightness = mapped
 
     return min(cr * brightness, 1.0), min(cg * brightness, 1.0), min(cb * brightness, 1.0)
 
@@ -1044,6 +1117,9 @@ def kerr_render_frame_parallel(
     w = xi_arr.shape[1]
     image = np.zeros((h, w, 3))
 
+    # Normalizacion del perfil Page-Thorne (una vez por frame)
+    f_pt_inv = page_thorne_norm_inv(r_inner, r_outer, a, m)
+
     for idx in prange(h * w):
         j = idx // w
         i = idx % w
@@ -1061,7 +1137,7 @@ def kerr_render_frame_parallel(
         cr, cg, cb = _kerr_color_from_geodesic(
             r_arr, theta_arr, phi_arr, n_valid,
             r_cam, theta_cam, xi, a, m,
-            r_inner, r_outer, base_temp, beaming_power, t, fate,
+            r_inner, r_outer, base_temp, beaming_power, t, fate, f_pt_inv,
         )
         image[j, i, 0] = cr
         image[j, i, 1] = cg
@@ -1079,5 +1155,5 @@ def warmup_kerr():
         xi, eta, beta_B,
         30.0, np.pi / 2.0 - 0.2, 0.0, 1.0,
         50.0, 100,
-        6.0, 20.0, 2200.0, 3.0,
+        6.0, 20.0, 4000.0, 3.0,
     )

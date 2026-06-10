@@ -123,7 +123,7 @@ def main() -> None:
     image = render_frame_parallel(
         b_arr, e1_arr, e2_arr, cam_pos,
         camera.r, RS, M, phi_max, n_steps,
-        R_ISCO, R_DISK_OUTER, 2200.0, 3.0,
+        R_ISCO, R_DISK_OUTER, 4000.0, 3.0,
     )
     t_render = time.perf_counter() - t0_render
 

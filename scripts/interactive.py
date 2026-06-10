@@ -108,7 +108,7 @@ def run_interactive(
         initial_spin: spin inicial (0.0 para Schwarzschild, 0.998 para Kerr)
         allow_spin_change: si True, teclas 0-9 cambian el spin
     """
-    from src.constants import kerr_isco
+    from src.constants import kerr_isco, page_thorne_norm_inv
 
     # --- Parametros iniciales de la camara ---
     cam_r = 30.0
@@ -121,7 +121,9 @@ def run_interactive(
     m = 1.0
     spin = initial_spin
     r_outer = 20.0
-    base_temp = 2200.0
+    # Temperatura en el radio de referencia del perfil Page-Thorne;
+    # T(r) = base_temp * (F/F_ref)^(1/4) — el nucleo supera base_temp (HDR)
+    base_temp = 4000.0
     beaming_power = 3.0
 
     # ISCO segun spin
@@ -129,6 +131,9 @@ def run_interactive(
         r_inner = 6.0
     else:
         r_inner = kerr_isco(spin, m, prograde=True)
+
+    # Normalizacion del perfil Page-Thorne (depende del spin via ISCO)
+    pt_fmax_inv = page_thorne_norm_inv(r_inner, r_outer, spin, m)
 
     # Tabla de spin: teclas 0-9
     SPIN_VALUES = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.998]
@@ -261,12 +266,13 @@ def run_interactive(
     pending_actions = []
 
     def update_isco():
-        """Recalcula ISCO basado en el spin actual."""
-        nonlocal r_inner
+        """Recalcula ISCO y la normalizacion Page-Thorne segun el spin."""
+        nonlocal r_inner, pt_fmax_inv
         if spin < 1e-6:
             r_inner = 6.0  # Schwarzschild ISCO
         else:
             r_inner = kerr_isco(spin, m, prograde=True)
+        pt_fmax_inv = page_thorne_norm_inv(r_inner, r_outer, spin, m)
 
     def on_key(_win, key, _scancode, action, _mods):
         nonlocal cam_theta, cam_phi, cam_r, n_steps, spin
@@ -391,6 +397,7 @@ def run_interactive(
         prog["u_r_outer"].value = float(r_outer)
         prog["u_base_temp"].value = float(base_temp)
         prog["u_beaming_power"].value = float(beaming_power)
+        prog["u_pt_fmax_inv"].value = float(pt_fmax_inv)
 
         prog["u_n_steps"].value = int(n_steps)
         prog["u_phi_max"].value = float(phi_max)

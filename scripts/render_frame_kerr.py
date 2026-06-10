@@ -154,7 +154,7 @@ def main() -> None:
     # Render paralelo
     n_steps = 3000
     lam_max = min(float(r_cam + 300), 0.15 * n_steps)
-    base_temp = 2200.0
+    base_temp = 4000.0
     beaming_power = 3.0
 
     print(f"\nRenderizando ({n_steps} pasos RK4 por geodesica, "

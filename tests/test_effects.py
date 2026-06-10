@@ -97,3 +97,66 @@ class TestConsistenciaKernels:
                     assert disk_g_factor(r, lam, a, 1.0) == pytest.approx(
                         cunningham_g_factor(r, lam, a=a), rel=1e-12,
                     )
+
+
+class TestPageThorne:
+    """Perfil de flujo exacto del disco delgado (Page & Thorne 1974)."""
+
+    def test_cero_en_isco_y_positivo_dentro(self) -> None:
+        from src.constants import page_thorne_flux
+
+        assert page_thorne_flux(6.0, 6.0) == 0.0
+        assert page_thorne_flux(5.0, 6.0) == 0.0
+        for r in [6.5, 8.0, 12.0, 20.0]:
+            assert page_thorne_flux(r, 6.0) > 0.0
+
+    def test_asintotico_shakura_sunyaev(self) -> None:
+        # Lejos del ISCO el flujo debe caer como r^-3 (T ~ r^-3/4)
+        from src.constants import page_thorne_flux
+
+        f1 = page_thorne_flux(1000.0, 6.0)
+        f2 = page_thorne_flux(2000.0, 6.0)
+        assert f1 / f2 == pytest.approx(8.0, rel=0.05)
+
+    def test_pico_en_zona_interna(self) -> None:
+        from src.constants import page_thorne_flux
+
+        radios = np.linspace(6.01, 20.0, 2000)
+        flujos = [page_thorne_flux(r, 6.0) for r in radios]
+        r_pico = radios[int(np.argmax(flujos))]
+        # El pico del flujo esta entre el ISCO y ~2x ISCO
+        assert 6.0 < r_pico < 12.0
+
+    def test_consistencia_numba_python(self) -> None:
+        from src.constants import page_thorne_flux
+        from src.numba_kernels import page_thorne_flux as pt_numba
+        from src.constants import kerr_isco
+
+        for a in [0.0, 0.5, 0.9, 0.998]:
+            r_isco = kerr_isco(a) if a > 1e-6 else 6.0
+            for r in [r_isco * 1.05, r_isco * 1.5, 10.0, 19.0]:
+                assert pt_numba(r, r_isco, a, 1.0) == pytest.approx(
+                    page_thorne_flux(r, r_isco, a), rel=1e-10,
+                )
+
+    def test_normalizacion(self) -> None:
+        from src.constants import page_thorne_flux, page_thorne_norm_inv
+
+        inv = page_thorne_norm_inv(6.0, 20.0, 0.0)
+        # La referencia es el radio medio geometrico: F(r_ref) * inv == 1
+        r_ref = np.sqrt(6.0 * 20.0)
+        assert page_thorne_flux(r_ref, 6.0) * inv == pytest.approx(1.0, rel=1e-12)
+        # El pico interior queda por encima de 1 (nucleo HDR)
+        radios = np.linspace(6.01, 20.0, 2000)
+        f_norm_max = max(page_thorne_flux(r, 6.0) * inv for r in radios)
+        assert f_norm_max > 1.0
+
+    def test_spin_aumenta_eficiencia_interna(self) -> None:
+        # Con mas spin el ISCO baja y el disco emite desde radios menores:
+        # a igual radio r=4M, el disco de a=0.998 (ISCO~1.24) emite,
+        # el de a=0 (ISCO=6) no.
+        from src.constants import page_thorne_flux, kerr_isco
+
+        r_isco_998 = kerr_isco(0.998)
+        assert page_thorne_flux(4.0, r_isco_998, 0.998) > 0.0
+        assert page_thorne_flux(4.0, 6.0, 0.0) == 0.0

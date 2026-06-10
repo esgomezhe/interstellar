@@ -36,6 +36,7 @@ uniform float u_lam_max;        // parametro afin maximo (Kerr)
 uniform float u_gamma;          // correccion gamma
 uniform float u_time;           // tiempo para animacion del disco
 uniform vec2  u_jitter;         // offset subpixel para supersampling temporal
+uniform float u_pt_fmax_inv;    // 1/max(F) del perfil Page-Thorne (normaliza)
 
 // --- Constantes ---
 const int MAX_CROSSINGS = 5;
@@ -149,11 +150,41 @@ float limb_darkening(float cos_theta_e) {
     return (1.0 + mu * abs(cos_theta_e)) / (1.0 + mu);
 }
 
-float novikov_thorne_emission(float r, float r_isco) {
-    float ratio = r_isco / r;
-    float factor = 1.0 - sqrt(ratio);
-    if (factor <= 0.0) return 0.0;
-    return pow(ratio, 0.75) * pow(factor, 0.25);
+// Perfil de temperatura normalizado del disco delgado relativista
+// (Page & Thorne 1974, ec. 15n): T_norm = (F/F_max)^(1/4).
+// Version EXACTA y dependiente del spin del Novikov-Thorne aproximado.
+// Con x = sqrt(r/M), x0 = sqrt(r_isco/M) y x1,x2,x3 raices de x^3-3x+2a*=0:
+//   F ∝ [x - x0 - (3a*/2)ln(x/x0) - Σ cᵢ ln((x-xᵢ)/(x0-xᵢ))] / [x⁴(x³-3x+2a*)]
+//   cᵢ = 3(xᵢ-a*)² / [xᵢ ∏_{j≠i}(xᵢ-xⱼ)]
+// La normalizacion u_pt_fmax_inv se calcula en CPU una vez por cambio de spin.
+float page_thorne_emission(float r, float r_isco, float a, float m) {
+    if (r <= r_isco) return 0.0;
+    float a_star = a / m;
+    float x  = sqrt(r / m);
+    float x0 = sqrt(r_isco / m);
+
+    float acs = acos(clamp(a_star, 0.0, 1.0));
+    float x1 = 2.0 * cos((acs - PI) / 3.0);
+    float x2 = 2.0 * cos((acs + PI) / 3.0);
+    float x3 = -2.0 * cos(acs / 3.0);
+
+    float d1 = x1 * (x1 - x2) * (x1 - x3);
+    float d2 = x2 * (x2 - x1) * (x2 - x3);
+    float d3 = x3 * (x3 - x1) * (x3 - x2);
+    float c1 = 3.0 * (x1 - a_star) * (x1 - a_star) / d1;
+    // a* = 0: x2 -> 0 y el limite de c2 es 0 (numerador ~ x2²)
+    float c2 = (abs(d2) < 1e-9) ? 0.0 : 3.0 * (x2 - a_star) * (x2 - a_star) / d2;
+    float c3 = 3.0 * (x3 - a_star) * (x3 - a_star) / d3;
+
+    float bracket = x - x0
+                  - 1.5 * a_star * log(x / x0)
+                  - c1 * log((x - x1) / (x0 - x1))
+                  - c2 * log(max(x - x2, 1e-9) / max(x0 - x2, 1e-9))
+                  - c3 * log((x - x3) / (x0 - x3));
+    float flux = bracket / (x*x*x*x * (x*x*x - 3.0*x + 2.0*a_star));
+    // f_norm > 1 cerca del pico (nucleo HDR): Reinhard absorbe el exceso
+    float f_norm = max(flux * u_pt_fmax_inv, 0.0);
+    return pow(f_norm, 0.25);
 }
 
 vec3 starfield(vec3 direction) {
@@ -321,22 +352,26 @@ vec3 trace_schwarzschild(float b, float lam, vec3 e1, vec3 e2,
     for (int c = 0; c < n_cross; c++) {
         float weight = (c == 0) ? 1.0 : 0.5;  // imagenes secundarias atenuadas
         float g_c = disk_g_factor(r_cross[c], lam, 0.0, m);
-        float em_c = novikov_thorne_emission(r_cross[c], r_inner);
+        // T_norm para el color; el BRILLO sigue al flujo F = T_norm^4
+        float t_norm = page_thorne_emission(r_cross[c], r_inner, 0.0, m);
+        float f_norm = t_norm * t_norm * t_norm * t_norm;
         vec3 hit_c = r_cross[c] * (cos(psi_cross[c]) * e1 + sin(psi_cross[c]) * e2);
         float az_c = atan(hit_c.y, hit_c.x);
         float turb_c = disk_turbulence(r_cross[c], az_c, m, 0.0, time);
-        float i_c = em_c * limb_factor[c] * turb_c * pow(g_c, beaming_power) * weight;
+        float i_c = f_norm * limb_factor[c] * turb_c * pow(g_c, beaming_power) * weight;
         if (i_c <= 0.0) continue;
-        acc += i_c * blackbody_rgb(base_temp * g_c);
+        acc += i_c * blackbody_rgb(base_temp * t_norm * g_c);
         total_i += i_c;
     }
 
     if (total_i <= 0.0) return vec3(0.0);
 
-    // Color promedio ponderado + tone mapping Reinhard
+    // Color promedio ponderado + tone mapping Reinhard. La compresion
+    // perceptual la hace u_gamma (una sola compresion — dos aplastarian
+    // el rango dinamico del flujo fisico de Page-Thorne)
     vec3 color = acc / total_i;
     float mapped = total_i / (1.0 + total_i);
-    return clamp(color * sqrt(mapped), 0.0, 1.0);
+    return clamp(color * mapped, 0.0, 1.0);
 }
 
 
@@ -581,21 +616,25 @@ vec3 trace_kerr(float xi, float eta, float beta_B,
     for (int c = 0; c < n_cross; c++) {
         float weight = (c == 0) ? 1.0 : 0.5;  // imagenes secundarias atenuadas
         float g_c = disk_g_factor(r_cross[c], xi, a, m);
-        float em_c = novikov_thorne_emission(r_cross[c], r_inner);
+        // T_norm para el color; el BRILLO sigue al flujo F = T_norm^4
+        float t_norm = page_thorne_emission(r_cross[c], r_inner, a, m);
+        float f_norm = t_norm * t_norm * t_norm * t_norm;
         float az_c = phi_cross[c] + phi_cam;  // azimuth global para turbulencia
         float turb_c = disk_turbulence(r_cross[c], az_c, m, a, time);
-        float i_c = em_c * limb_fac[c] * turb_c * pow(g_c, beaming_power) * weight;
+        float i_c = f_norm * limb_fac[c] * turb_c * pow(g_c, beaming_power) * weight;
         if (i_c <= 0.0) continue;
-        acc += i_c * blackbody_rgb(base_temp * g_c);
+        acc += i_c * blackbody_rgb(base_temp * t_norm * g_c);
         total_i += i_c;
     }
 
     if (total_i <= 0.0) return vec3(0.0);
 
-    // Color promedio ponderado + tone mapping Reinhard
+    // Color promedio ponderado + tone mapping Reinhard. La compresion
+    // perceptual la hace u_gamma (una sola compresion — dos aplastarian
+    // el rango dinamico del flujo fisico de Page-Thorne)
     vec3 color = acc / total_i;
     float mapped = total_i / (1.0 + total_i);
-    return clamp(color * sqrt(mapped), 0.0, 1.0);
+    return clamp(color * mapped, 0.0, 1.0);
 }
 
 
