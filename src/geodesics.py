@@ -67,9 +67,16 @@ def initial_conditions(
     Returns:
         (b, u0, du0): parametro de impacto, u=1/r inicial, du/dphi inicial.
     """
-    b = r_cam * np.sin(alpha)
+    # Observador ESTATICO a distancia finita: factor de lapse (Synge 1966)
+    #   b = r_cam * sin(alpha) / sqrt(1 - rs/r_cam)
+    lapse = np.sqrt(1.0 - RS / r_cam)
+    b = r_cam * np.sin(alpha) / lapse
     u0 = 1.0 / r_cam
-    du0 = -np.cos(alpha) / (r_cam * np.sin(alpha))  # -cot(alpha) / r_cam
+    # De la ecuacion de energia: (du/dphi)^2 = 1/b^2 - u^2 + rs*u^3
+    # Signo POSITIVO: u crece porque el rayo va hacia el agujero
+    # (consistente con trace_geodesic)
+    val = 1.0 / b**2 - u0**2 + RS * u0**3
+    du0 = np.sqrt(max(val, 0.0))
     return b, u0, du0
 
 
@@ -311,7 +318,7 @@ def kerr_geodesic_rhs(
     dr_dlam = np.sqrt(R_val) * inv_sigma
     dtheta_dlam = np.sqrt(Theta_val) * inv_sigma
     dphi_dlam = (-a + a * P / delta + xi / (sin_t * sin_t)) * inv_sigma
-    dt_dlam = (-a * a * sin_t * sin_t + (r * r + a * a) * P / delta) * inv_sigma
+    dt_dlam = (a * (xi - a * sin_t * sin_t) + (r * r + a * a) * P / delta) * inv_sigma
 
     return [dr_dlam, dtheta_dlam, dphi_dlam, dt_dlam]
 
@@ -361,7 +368,7 @@ def kerr_geodesic_rhs_2nd_order(
     dphi = (-a + a * P / delta + xi / (sin_t * sin_t)) * inv_sigma
 
     # dt/dlam
-    dt_val = (-a * a * sin_t * sin_t + (r * r + a * a) * P / delta) * inv_sigma
+    dt_val = (a * (xi - a * sin_t * sin_t) + (r * r + a * a) * P / delta) * inv_sigma
 
     # dp_r/dlam = (1/2) * dR/dr / Sigma
     # R(r) = P² - Delta * [eta + (xi-a)²]

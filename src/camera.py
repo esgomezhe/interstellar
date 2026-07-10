@@ -15,6 +15,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from src.constants import RS
+
 
 @dataclass
 class RayInfo:
@@ -89,11 +91,14 @@ class Camera:
         d = -e_r + np.tan(alpha) * e_phi + np.tan(beta) * (-e_theta)
         d /= np.linalg.norm(d)
 
-        # Parametro de impacto: b = r_cam * |r_hat x d_hat|
+        # Parametro de impacto para observador ESTATICO a distancia finita
+        # (Synge 1966): b = r * sin(psi) / sqrt(1 - rs/r).
+        # Sin el factor de lapse la escala angular de la imagen queda ~3.5%
+        # mas grande a r=30M.
         r_hat = e_r
         cross = np.cross(r_hat, d)
         sin_psi = np.linalg.norm(cross)
-        b = self.r * sin_psi
+        b = self.r * sin_psi / np.sqrt(1.0 - RS / self.r)
 
         # Base del plano orbital
         if sin_psi < 1e-12:
@@ -123,6 +128,7 @@ class Camera:
         fov_rad = np.radians(self.fov)
         pixel_size = fov_rad / self.height
         e_r, e_theta, e_phi = self._basis
+        inv_lapse = 1.0 / np.sqrt(1.0 - RS / self.r)
 
         for j in range(self.height):
             for i in range(self.width):
@@ -131,7 +137,7 @@ class Camera:
                 d = -e_r + np.tan(alpha) * e_phi + np.tan(beta) * (-e_theta)
                 d /= np.linalg.norm(d)
                 cross = np.cross(e_r, d)
-                b_array[j, i] = self.r * np.linalg.norm(cross)
+                b_array[j, i] = self.r * np.linalg.norm(cross) * inv_lapse
         return b_array
 
     # -----------------------------------------------------------------
@@ -165,9 +171,13 @@ class Camera:
         alpha_pix = (i - self.width / 2.0 + 0.5) * pixel_size
         beta_pix = (self.height / 2.0 - j - 0.5) * pixel_size
 
-        # Coordenadas Bardeen en unidades de M
-        alpha_B = self.r * np.tan(alpha_pix)
-        beta_B = self.r * np.tan(beta_pix)
+        # Coordenadas Bardeen en unidades de M, con el factor de lapse del
+        # observador estatico a distancia finita (correccion dominante
+        # O(M/r); los terminos de frame-dragging son O(aM^2/r^3), ~1e-5
+        # a r=30M, y se desprecian)
+        inv_lapse = 1.0 / np.sqrt(1.0 - RS / self.r)
+        alpha_B = self.r * np.tan(alpha_pix) * inv_lapse
+        beta_B = self.r * np.tan(beta_pix) * inv_lapse
 
         sin_t = np.sin(self.theta)
         cos_t = np.cos(self.theta)
@@ -191,14 +201,16 @@ class Camera:
         cot_t = cos_t / sin_t if abs(sin_t) > 1e-12 else 0.0
         a2cos2 = a * a * cos_t * cos_t
         cot2 = cot_t * cot_t
+        # Lapse del observador estatico a distancia finita (ver pixel_to_carter)
+        inv_lapse = 1.0 / np.sqrt(1.0 - RS / self.r)
 
         for j in range(self.height):
             beta_pix = (self.height / 2.0 - j - 0.5) * pixel_size
-            beta_B = self.r * np.tan(beta_pix)
+            beta_B = self.r * np.tan(beta_pix) * inv_lapse
             beta_B2 = beta_B * beta_B
             for i in range(self.width):
                 alpha_pix = (i - self.width / 2.0 + 0.5) * pixel_size
-                alpha_B = self.r * np.tan(alpha_pix)
+                alpha_B = self.r * np.tan(alpha_pix) * inv_lapse
                 xi = -alpha_B * sin_t
                 xi_arr[j, i] = xi
                 eta_arr[j, i] = beta_B2 - a2cos2 + xi * xi * cot2

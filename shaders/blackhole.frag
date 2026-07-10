@@ -668,7 +668,9 @@ void main() {
         d = normalize(d);
         vec3 cross_rd = cross(e_r, d);
         float sin_psi = length(cross_rd);
-        float b = u_r_cam * sin_psi;
+        // Observador estatico a distancia finita (Synge 1966):
+        // b = r * sin(psi) / sqrt(1 - rs/r)
+        float b = u_r_cam * sin_psi / sqrt(1.0 - u_rs / u_r_cam);
 
         if (b < 1e-6) {
             frag_color = vec4(0.0, 0.0, 0.0, 1.0);
@@ -694,8 +696,12 @@ void main() {
     }
     else {
         // === KERR ===
-        float alpha_B = u_r_cam * tan(alpha_pix);
-        float beta_B  = u_r_cam * tan(beta_pix);
+        // Coordenadas Bardeen con lapse del observador estatico a distancia
+        // finita (correccion dominante O(M/r); frame-dragging O(aM^2/r^3)
+        // es despreciable a r >= 30M)
+        float inv_lapse = inversesqrt(1.0 - u_rs / u_r_cam);
+        float alpha_B = u_r_cam * tan(alpha_pix) * inv_lapse;
+        float beta_B  = u_r_cam * tan(beta_pix) * inv_lapse;
 
         float sin_t = sin(u_theta_cam);
         float cos_t = cos(u_theta_cam);

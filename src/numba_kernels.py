@@ -750,7 +750,7 @@ def _kerr_rk4_step(r, theta, p_r, p_theta, phi, t_coord,
         dtheta = p_theta_ * inv_sigma
 
         dphi = (-a + a * P / delta + xi / (sin_t * sin_t)) * inv_sigma
-        dt = (-a * a * sin_t * sin_t + (r_ * r_ + a * a) * P / delta) * inv_sigma
+        dt = (a * (xi - a * sin_t * sin_t) + (r_ * r_ + a * a) * P / delta) * inv_sigma
 
         # dp_r = (1/2) * dR/dr / Sigma
         dR_dr = 4.0 * r_ * P - (2.0 * r_ - 2.0 * m) * (eta + (xi - a) ** 2)

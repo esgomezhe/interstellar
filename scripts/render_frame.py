@@ -56,7 +56,8 @@ def precompute_rays(camera):
     r_hat = e_r.reshape(1, 1, 3)
     cross = np.cross(np.broadcast_to(r_hat, d.shape), d)
     sin_psi = np.linalg.norm(cross, axis=2)
-    b_arr = camera.r * sin_psi
+    # Observador estatico a distancia finita (Synge 1966): b = r*sin(psi)/lapse
+    b_arr = camera.r * sin_psi / np.sqrt(1.0 - RS / camera.r)
 
     # Plano orbital: e1 = r_hat, e2 = (cross/|cross|) x e1
     e1_arr = np.broadcast_to(e_r, (h, w, 3)).copy()

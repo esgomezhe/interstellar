@@ -160,3 +160,44 @@ class TestPageThorne:
         r_isco_998 = kerr_isco(0.998)
         assert page_thorne_flux(4.0, r_isco_998, 0.998) > 0.0
         assert page_thorne_flux(4.0, 6.0, 0.0) == 0.0
+
+    def test_integral_definitoria_page_thorne(self) -> None:
+        """
+        Verificacion independiente: la forma cerrada debe ser proporcional
+        a la integral definitoria de Page & Thorne (1974, ec. 15) evaluada
+        con las cantidades de orbita circular de BPT 1972.
+        """
+        from scipy.integrate import quad
+        from src.constants import page_thorne_flux, kerr_isco
+
+        def omega(r, a):
+            return 1.0 / (r ** 1.5 + a)
+
+        def e_dag(r, a):
+            d = r ** 0.75 * np.sqrt(r ** 1.5 - 3.0 * np.sqrt(r) + 2.0 * a)
+            return (r ** 1.5 - 2.0 * np.sqrt(r) + a) / d
+
+        def l_dag(r, a):
+            d = r ** 0.75 * np.sqrt(r ** 1.5 - 3.0 * np.sqrt(r) + 2.0 * a)
+            return (r * r - 2.0 * a * np.sqrt(r) + a * a) / d
+
+        def deriv(f, r, a, h=1e-6):
+            return (f(r + h, a) - f(r - h, a)) / (2.0 * h)
+
+        def f_integral(r, r_isco, a):
+            integrand = lambda rr: (
+                (e_dag(rr, a) - omega(rr, a) * l_dag(rr, a))
+                * deriv(l_dag, rr, a)
+            )
+            val, _ = quad(integrand, r_isco, r, limit=100)
+            e_min_ol = e_dag(r, a) - omega(r, a) * l_dag(r, a)
+            return -deriv(omega, r, a) / (r * e_min_ol ** 2) * val
+
+        for a in [0.0, 0.998]:
+            r_isco = kerr_isco(a) if a > 1e-6 else 6.0
+            ratios = [
+                page_thorne_flux(r, r_isco, a) / f_integral(r, r_isco, a)
+                for r in np.linspace(r_isco * 1.2, 20.0, 5)
+            ]
+            # El cociente debe ser CONSTANTE en r (misma funcion salvo norma)
+            assert max(ratios) / min(ratios) == pytest.approx(1.0, rel=1e-6)
